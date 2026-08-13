@@ -1,0 +1,18 @@
+
+.App { 
+	width: 100%;
+	height: 100%;
+}
+
+canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.xr-button {
+	position: fixed;
+	top: 16px;
+	left: 16px;
+	z-index: 10;
+}
