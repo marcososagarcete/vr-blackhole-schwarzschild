@@ -1,3 +1,6 @@
+#Ignorar mis comentarios y registros
+notas/
+
 # Logs
 logs
 *.log
