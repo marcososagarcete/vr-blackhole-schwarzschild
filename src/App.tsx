@@ -33,7 +33,62 @@ function XRResetButton({ onReset }: { onReset: () => void }) {
 }
 
 function App() {
-	
+
+
+const XRLocomotion = () => {
+	const leftController = useXRInputSourceState('controller', 'left')
+	const { camera } = useThree()
+
+	const forwardRef = useRef(new Vector3())
+	const rightRef = useRef(new Vector3())
+	const moveRef = useRef(new Vector3())
+
+	useFrame((_, delta) => {
+		if (!leftController || !xrOriginRef.current) return
+
+		const stick =
+			leftController.gamepad['xr-standard-thumbstick']
+
+		if (!stick) return
+
+		let x = stick.xAxis ?? 0
+		let y = stick.yAxis ?? 0
+
+		// Evitar drift del joystick
+		const DEADZONE = 0.15
+		if (Math.abs(x) < DEADZONE) x = 0
+		if (Math.abs(y) < DEADZONE) y = 0
+
+		const forward = forwardRef.current
+		const right = rightRef.current
+		const move = moveRef.current
+
+		// Dirección hacia donde mira el usuario
+		camera.getWorldDirection(forward)
+		forward.y = 0
+		forward.normalize()
+
+		right.crossVectors(forward, camera.up).normalize()
+
+		move.set(0, 0, 0)
+		move.addScaledVector(right, x)
+		move.addScaledVector(forward, -y)
+
+		if (move.lengthSq() > 1)
+			move.normalize()
+
+		const SPEED = 1.5
+		move.multiplyScalar(SPEED * delta)
+
+		// IMPORTANTE: no tocamos Y
+		xrOriginRef.current.position.x += move.x
+		xrOriginRef.current.position.z += move.z
+	})
+
+	return null
+}
+
+
 	const particleRef = useRef<Mesh>(null)
 	// Buffer preasignado para evitar crear memoria nueva durante cada frame.
 	const trailPositionsRef = useRef(new Float32Array(TRAIL_MAX_POINTS * 3))
@@ -594,7 +649,9 @@ return (
       {/* Contexto XR: todo lo que este dentro puede renderizarse en VR */}
         <XR store={xrStore}>
 	{/* Origen del jugador: se mueve en VR en lugar de mover la camara */}
+	
 	<XROrigin ref={xrOriginRef} />
+	<XRLocomotion />
 
 	{/* Para hacer reset con el boton a del metaquest */}
 
