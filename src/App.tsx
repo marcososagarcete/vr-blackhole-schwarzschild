@@ -1,6 +1,6 @@
 import './App.css'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import {  XR, createXRStore, XROrigin } from '@react-three/xr'
+import {  XR, createXRStore, XROrigin, useXRInputSourceState } from '@react-three/xr'
 import { useRef, useState, useEffect } from 'react'
 import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, Line as ThreeLine, LineBasicMaterial, Mesh, Vector3 } from 'three'
 import type { ThreeEvent } from '@react-three/fiber'
@@ -15,6 +15,21 @@ type InitialConditions = {
 	phi0: number
 	vhat_r: number
 	vhat_phi: number
+}
+
+function XRResetButton({ onReset }: { onReset: () => void }) {
+	const rightController = useXRInputSourceState('controller', 'right')
+	const wasPressed = useRef(false)
+
+	useFrame(() => {
+		const pressed = 
+			rightController?.gamepad['a-button']?.state === 'pressed'
+		if (pressed && !wasPressed.current) {
+			onReset()
+		}
+		wasPressed.current = pressed
+	})
+	return null
 }
 
 function App() {
@@ -581,6 +596,10 @@ return (
 	{/* Origen del jugador: se mueve en VR en lugar de mover la camara */}
 	<XROrigin ref={xrOriginRef} />
 
+	{/* Para hacer reset con el boton a del metaquest */}
+
+	<XRResetButton onReset={resetParticle} />
+
 	<SimulationStepper />
 	<OrbitTrail />
 	
@@ -631,7 +650,7 @@ return (
 		color="white"
 		>
 		{initialConditions
-			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.11`
+			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.12`
 			: 'Sin condiciones \niniciales'}
 			</Text>
 			</group>
