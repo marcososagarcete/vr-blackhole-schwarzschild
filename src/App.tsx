@@ -37,6 +37,7 @@ function App() {
 
 const XRLocomotion = () => {
 	const leftController = useXRInputSourceState('controller', 'left')
+	const rightController = useXRInputSourceState('controller', 'right')
 	const { camera } = useThree()
 
 	const forwardRef = useRef(new Vector3())
@@ -46,13 +47,13 @@ const XRLocomotion = () => {
 	useFrame((_, delta) => {
 		if (!leftController || !xrOriginRef.current) return
 
-		const stick =
+		const leftStick =
 			leftController.gamepad['xr-standard-thumbstick']
 
-		if (!stick) return
+		if (!leftStick) return
 
-		let x = stick.xAxis ?? 0
-		let y = stick.yAxis ?? 0
+		let x = leftStick.xAxis ?? 0
+		let y = leftStick.yAxis ?? 0
 
 		// Evitar drift del joystick
 		const DEADZONE = 0.15
@@ -83,7 +84,22 @@ const XRLocomotion = () => {
 		// IMPORTANTE: no tocamos Y
 		xrOriginRef.current.position.x += move.x
 		xrOriginRef.current.position.z += move.z
-	})
+	
+		// RS: rotacion izquierdaderecha
+		const rightStick = 
+			rightController?.gamepad['xr-standard-thumbstick']
+
+		if (rightStick) {
+			let x = rightStick.xAxis ?? 0
+			const DEADZONE = 0.15
+			if (Math.abs(x) < DEADZONE) x = 0
+			const ROTATION_SPEED = 1.8
+		xrOriginRef.current.rotation.y -=
+			x * ROTATION_SPEED * delta
+		}
+
+	}
+		)
 
 	return null
 }
@@ -644,7 +660,7 @@ return (
 
 
       {/* Lienzo principal de la escena 3D */}
-      <Canvas camera={{ position: [8, 1.6, 0], fov: 60 }}>
+      <Canvas camera={{ position: [-0.3, 1.6, 2.7], rotation: [0, 0, 0], fov: 60 }}>
        
       {/* Contexto XR: todo lo que este dentro puede renderizarse en VR */}
         <XR store={xrStore}>
@@ -678,7 +694,7 @@ return (
 
 <mesh
 	ref={particleRef}
-	position={[1.4, 1.4, -1]}
+	position={[1.4, 1.4, -0.5]}
 	onPointerDown={handlePointerDown}
 	onPointerMove={handlePointerMove}
 	onPointerUp={handlePointerUp}>
@@ -707,7 +723,7 @@ return (
 		color="white"
 		>
 		{initialConditions
-			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.12`
+			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.13`
 			: 'Sin condiciones \niniciales'}
 			</Text>
 			</group>
