@@ -97,8 +97,24 @@ const XRLocomotion = () => {
 		xrOriginRef.current.rotation.y -=
 			x * ROTATION_SPEED * delta
 		}
+	
+	// L2/R2: bajar/subir altura
+		const leftGrip =
+			leftController?.gamepad['xr-standard-squeeze']
+		const rightGrip =
+			rightController?.gamepad['xr-standard-squeeze']
 
-	}
+		const HEIGHT_SPEED = 1.0
+
+		if (leftGrip?.state === 'pressed') {
+			xrOriginRef.current.position.y -= HEIGHT_SPEED * delta
+		}
+
+		if (rightGrip?.state === 'pressed') {
+			xrOriginRef.current.position.y += HEIGHT_SPEED * delta
+		}
+
+	} //Fin del useframe del movimiento
 		)
 
 	return null
@@ -723,7 +739,7 @@ return (
 		color="white"
 		>
 		{initialConditions
-			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.13`
+			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.14`
 			: 'Sin condiciones \niniciales'}
 			</Text>
 			</group>
