@@ -78,7 +78,7 @@ const XRLocomotion = () => {
 		if (move.lengthSq() > 1)
 			move.normalize()
 
-		const SPEED = 1.5
+		const SPEED = 2.5
 		move.multiplyScalar(SPEED * delta)
 
 		// IMPORTANTE: no tocamos Y
@@ -93,7 +93,7 @@ const XRLocomotion = () => {
 			let x = rightStick.xAxis ?? 0
 			const DEADZONE = 0.15
 			if (Math.abs(x) < DEADZONE) x = 0
-			const ROTATION_SPEED = 1.8
+			const ROTATION_SPEED = 2.2
 		xrOriginRef.current.rotation.y -=
 			x * ROTATION_SPEED * delta
 		}
@@ -104,7 +104,7 @@ const XRLocomotion = () => {
 		const rightGrip =
 			rightController?.gamepad['xr-standard-squeeze']
 
-		const HEIGHT_SPEED = 1.0
+		const HEIGHT_SPEED = 2.5
 
 		if (leftGrip?.state === 'pressed') {
 			xrOriginRef.current.position.y -= HEIGHT_SPEED * delta
@@ -739,7 +739,7 @@ return (
 		color="white"
 		>
 		{initialConditions
-			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.14`
+			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.15 `
 			: 'Sin condiciones \niniciales'}
 			</Text>
 			</group>
