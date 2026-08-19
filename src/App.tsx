@@ -9,6 +9,8 @@ import initWasm, { set_params, set_initial, set_initial_3d, step } from './wasm-
 const xrStore = createXRStore()
 const BLACK_HOLE_POSITION = { x: 0, y: 1.4, z: 0 }
 const TRAIL_MAX_POINTS = 10_000
+const THROW_SAMPLE_COUNT = 4
+const XR_GRAB_DISTANCE = 0.25
 
 type InitialConditions = {
 	r0: number
@@ -78,7 +80,7 @@ const XRLocomotion = () => {
 		if (move.lengthSq() > 1)
 			move.normalize()
 
-		const SPEED = 2.5
+		const SPEED = 1.8 
 		move.multiplyScalar(SPEED * delta)
 
 		// IMPORTANTE: no tocamos Y
@@ -93,7 +95,7 @@ const XRLocomotion = () => {
 			let x = rightStick.xAxis ?? 0
 			const DEADZONE = 0.15
 			if (Math.abs(x) < DEADZONE) x = 0
-			const ROTATION_SPEED = 2.2
+			const ROTATION_SPEED = 1.8 
 		xrOriginRef.current.rotation.y -=
 			x * ROTATION_SPEED * delta
 		}
@@ -104,7 +106,7 @@ const XRLocomotion = () => {
 		const rightGrip =
 			rightController?.gamepad['xr-standard-squeeze']
 
-		const HEIGHT_SPEED = 2.5
+		const HEIGHT_SPEED = 1.8 
 
 		if (leftGrip?.state === 'pressed') {
 			xrOriginRef.current.position.y -= HEIGHT_SPEED * delta
@@ -152,6 +154,11 @@ const XRLocomotion = () => {
 
 //Velocidad instantanea 3D al soltar.
 	const releaseVelocityRef = useRef<{ vx: number; vy: number; vz: number }>({ vx: 0, vy: 0, vz: 0})
+
+	// Estado reservado para medir el lanzamiento físico de un controlador XR.
+	const xrGrabbedHandRef = useRef<'left' | 'right' | null>(null)
+	const xrPreviousControllerPositionRef = useRef<Vector3 | null>(null)
+	const xrVelocitySamplesRef = useRef<Vector3[]>([])
 
 useEffect(() => {
 
@@ -201,7 +208,7 @@ useEffect(() => {
 
 useEffect(() => {
 	const onKeyDown = (e: KeyboardEvent) => {
-		if (e.code === 'KeyE') {
+		if (e.code === 'Enter') {
 			resetParticle()
 		}
 	}
@@ -288,6 +295,10 @@ useEffect(() => {
 		//Reiniciar velocidad media por el flick (tal vez sea necesario editar luego)
 		releaseVelocityRef.current = { vx: 0, vy: 0, vz: 0}
 		lastSampleRef.current = null
+		// Limpiar muestras XR antes del próximo lanzamiento con controlador.
+		xrGrabbedHandRef.current = null
+		xrPreviousControllerPositionRef.current = null
+		xrVelocitySamplesRef.current = []
 
 		//Mover la pelota a la posicion inicial
 		if (particleRef.current) {
@@ -402,11 +413,10 @@ useEffect(() => {
 	}
 
 
-	const handleParticleRelease = () => {
-//Si no hay referencia a la pelota, no se hace nada	
-		if (!particleRef.current) return
-		const p = new Vector3()
-		particleRef.current.getWorldPosition(p)
+	// Ruta común: desktop y XR entregarán aquí su posición y velocidad de entrada.
+	const releaseParticle = (p: Vector3, inputVelocity: Vector3) => {
+		// Detener una simulación anterior antes de aceptar un lanzamiento nuevo.
+		simRunningRef.current = false
 
 		// La posición que recibe Rust es relativa al centro del agujero negro.
 		const rx = p.x - BLACK_HOLE_POSITION.x
@@ -426,9 +436,9 @@ useEffect(() => {
 		appendTrailPoint(p.x, p.y, p.z)
 
 		// Leer la velocidad de flick estimada en las tres coordenadas del mundo.
-		const vx = releaseVelocityRef.current.vx
-		const vy = releaseVelocityRef.current.vy
-		const vz = releaseVelocityRef.current.vz
+		const vx = inputVelocity.x
+		const vy = inputVelocity.y
+		const vz = inputVelocity.z
 
 //Escala de calibracion: convierte input del control a velocidad fisica local
 	const S = 0.2
@@ -457,12 +467,14 @@ useEffect(() => {
 //Guardar condiciones para el solver
 		setInitialConditions({ r0, phi0, vhat_r, vhat_phi: vhat_t })
 		//Envia condiciones iniciales al solver Rust/WASM
+		let ok = false
 		if (wasmReady) {
-			const ok = set_initial_3d(rx, ry, rz, vhat_x, vhat_y, vhat_z)
+			ok = set_initial_3d(rx, ry, rz, vhat_x, vhat_y, vhat_z)
 			console.log('set_initial_3d WASM ->', ok)
-		
-		//Activar avance continuo si Rust acepto las condiciones iniciales
-		simRunningRef.current = ok
+
+			//Activar avance continuo si Rust acepto las condiciones iniciales
+			simRunningRef.current = ok
+		}
 
 		//Probar un pequeno avance del solver
 		//if (ok && particleRef.current) {
@@ -484,7 +496,78 @@ useEffect(() => {
 			vhat_x, vhat_y, vhat_z, vhat_r, vhat_t,
 			vhat: Math.hypot(vhat_x, vhat_y, vhat_z),
 		})
+
+		return ok
 	}
+
+	// Adaptador de desktop: conserva el mouse como fuente de posición y velocidad.
+	const handleParticleRelease = () => {
+//Si no hay referencia a la pelota, no se hace nada	
+		if (!particleRef.current) return
+		const position = particleRef.current.getWorldPosition(new Vector3())
+		const velocity = releaseVelocityRef.current
+		releaseParticle(position, new Vector3(velocity.vx, velocity.vy, velocity.vz))
+	}
+
+	const XRThrowTracker = () => {
+		const leftController = useXRInputSourceState('controller', 'left')
+		const rightController = useXRInputSourceState('controller', 'right')
+		const controllerPositionRef = useRef(new Vector3())
+		const particlePositionRef = useRef(new Vector3())
+
+		useFrame((_, delta) => {
+			const controllers = [
+				{ hand: 'left' as const, controller: leftController },
+				{ hand: 'right' as const, controller: rightController },
+			]
+
+			for (const { hand, controller } of controllers) {
+				const triggerPressed = controller?.gamepad['xr-standard-trigger']?.state === 'pressed'
+				if (!controller?.object) continue
+
+				const controllerPosition = controller.object.getWorldPosition(controllerPositionRef.current)
+				const grabbedHand = xrGrabbedHandRef.current
+
+				// Iniciar agarre solo si el controlador está cerca de la partícula.
+				if (grabbedHand === null && triggerPressed && particleRef.current) {
+					particleRef.current.getWorldPosition(particlePositionRef.current)
+					if (controllerPosition.distanceTo(particlePositionRef.current) <= XR_GRAB_DISTANCE) {
+						simRunningRef.current = false
+						xrGrabbedHandRef.current = hand
+						xrPreviousControllerPositionRef.current = controllerPosition.clone()
+						xrVelocitySamplesRef.current = []
+					}
+				}
+
+				if (xrGrabbedHandRef.current !== hand || !particleRef.current) continue
+
+				// Mientras se mantiene el gatillo, la pelota sigue la pose del controlador.
+				particleRef.current.position.copy(controllerPosition)
+				const previousPosition = xrPreviousControllerPositionRef.current
+				if (previousPosition && delta > 1e-4) {
+					const sample = controllerPosition.clone().sub(previousPosition).multiplyScalar(1 / delta)
+					const samples = xrVelocitySamplesRef.current
+					samples.push(sample)
+					if (samples.length > THROW_SAMPLE_COUNT) samples.shift()
+					previousPosition.copy(controllerPosition)
+				}
+
+				if (triggerPressed) continue
+
+				// Promediar pocas muestras reduce jitter sin retrasar apreciablemente el lanzamiento.
+				const samples = xrVelocitySamplesRef.current
+				const averageVelocity = new Vector3()
+				for (const sample of samples) averageVelocity.add(sample)
+				if (samples.length > 0) averageVelocity.multiplyScalar(1 / samples.length)
+
+				releaseParticle(controllerPosition.clone(), averageVelocity)
+				xrGrabbedHandRef.current = null
+				xrPreviousControllerPositionRef.current = null
+				xrVelocitySamplesRef.current = []
+			}
+		})
+
+		return null
 	}
 
 	
@@ -684,6 +767,7 @@ return (
 	
 	<XROrigin ref={xrOriginRef} />
 	<XRLocomotion />
+	<XRThrowTracker />
 
 	{/* Para hacer reset con el boton a del metaquest */}
 
@@ -739,8 +823,8 @@ return (
 		color="white"
 		>
 		{initialConditions
-			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.15 `
-			: 'Sin condiciones \niniciales'}
+			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.16 `
+			: 'Sin condiciones \niniciales\n version: 0.16 '}
 			</Text>
 			</group>
 
