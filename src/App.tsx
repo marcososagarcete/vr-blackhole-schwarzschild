@@ -1,22 +1,40 @@
 import './App.css'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import {  XR, createXRStore, XROrigin, useXRInputSourceState } from '@react-three/xr'
+import {  XR, createXRStore, XROrigin, useXRInputSourceEvent, useXRInputSourceState } from '@react-three/xr'
 import { useRef, useState, useEffect } from 'react'
-import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, Line as ThreeLine, LineBasicMaterial, Mesh, Vector3 } from 'three'
+import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, Line as ThreeLine, LineBasicMaterial, Mesh, Object3D, Vector3 } from 'three'
 import type { ThreeEvent } from '@react-three/fiber'
 import { Text } from '@react-three/drei'
-import initWasm, { set_params, set_initial, set_initial_3d, step } from './wasm-core/wasm_core'
+import initWasm, { get_radial_velocity, set_params, set_initial, set_initial_3d, step } from './wasm-core/wasm_core'
 const xrStore = createXRStore()
+
 const BLACK_HOLE_POSITION = { x: 0, y: 1.4, z: 0 }
 const TRAIL_MAX_POINTS = 10_000
 const THROW_SAMPLE_COUNT = 4
-const XR_GRAB_DISTANCE = 0.25
 
 type InitialConditions = {
 	r0: number
 	phi0: number
 	vhat_r: number
 	vhat_phi: number
+}
+
+type SimulationDebug = {
+	r0: number
+	position: [number, number, number]
+	inputVelocity: [number, number, number]
+	inputSpeed: number
+	physicalVelocity: [number, number, number]
+	physicalSpeed: number
+	alpha0: number
+	currentR: number
+	radialVelocity: number
+	status: string
+}
+
+type XRRayPointerState = {
+	inputSource?: { handedness?: string }
+	object?: Object3D
 }
 
 function XRResetButton({ onReset }: { onReset: () => void }) {
@@ -80,7 +98,7 @@ const XRLocomotion = () => {
 		if (move.lengthSq() > 1)
 			move.normalize()
 
-		const SPEED = 1.8 
+		const SPEED = 2.5
 		move.multiplyScalar(SPEED * delta)
 
 		// IMPORTANTE: no tocamos Y
@@ -95,7 +113,7 @@ const XRLocomotion = () => {
 			let x = rightStick.xAxis ?? 0
 			const DEADZONE = 0.15
 			if (Math.abs(x) < DEADZONE) x = 0
-			const ROTATION_SPEED = 1.8 
+			const ROTATION_SPEED = 2.2
 		xrOriginRef.current.rotation.y -=
 			x * ROTATION_SPEED * delta
 		}
@@ -106,7 +124,7 @@ const XRLocomotion = () => {
 		const rightGrip =
 			rightController?.gamepad['xr-standard-squeeze']
 
-		const HEIGHT_SPEED = 1.8 
+		const HEIGHT_SPEED = 2.5
 
 		if (leftGrip?.state === 'pressed') {
 			xrOriginRef.current.position.y -= HEIGHT_SPEED * delta
@@ -143,9 +161,11 @@ const XRLocomotion = () => {
 // Indica si el modulo WASM ya fue cargado
 	const [wasmReady, setWasmReady] = useState(false)
 
-	const [initialConditions, setInitialConditions] = useState<InitialConditions | null>(null)
+		const [initialConditions, setInitialConditions] = useState<InitialConditions | null>(null)
 //Modulo de velocidad local para mostrar en el HUD
-	const [vhatMag, setVhatMag] = useState<number | null>(null)
+		const [vhatMag, setVhatMag] = useState<number | null>(null)
+		const [simulationDebug, setSimulationDebug] = useState<SimulationDebug | null>(null)
+		const simulationDebugRef = useRef<SimulationDebug | null>(null)
 
 
 
@@ -155,10 +175,16 @@ const XRLocomotion = () => {
 //Velocidad instantanea 3D al soltar.
 	const releaseVelocityRef = useRef<{ vx: number; vy: number; vz: number }>({ vx: 0, vy: 0, vz: 0})
 
-	// Estado reservado para medir el lanzamiento físico de un controlador XR.
-	const xrGrabbedHandRef = useRef<'left' | 'right' | null>(null)
-	const xrPreviousControllerPositionRef = useRef<Vector3 | null>(null)
-	const xrVelocitySamplesRef = useRef<Vector3[]>([])
+		// Estado del agarre remoto y del muestreo físico del lanzamiento XR.
+		const xrGrabbedHandRef = useRef<'left' | 'right' | null>(null)
+		const xrGrabOffsetRef = useRef(new Vector3())
+		const xrPreviousParticlePositionRef = useRef(new Vector3())
+		const xrHasPreviousPositionRef = useRef(false)
+		const xrVelocitySamplesRef = useRef(
+			Array.from({ length: THROW_SAMPLE_COUNT }, () => new Vector3()),
+		)
+		const xrVelocitySampleCountRef = useRef(0)
+		const xrVelocitySampleIndexRef = useRef(0)
 
 useEffect(() => {
 
@@ -297,8 +323,11 @@ useEffect(() => {
 		lastSampleRef.current = null
 		// Limpiar muestras XR antes del próximo lanzamiento con controlador.
 		xrGrabbedHandRef.current = null
-		xrPreviousControllerPositionRef.current = null
-		xrVelocitySamplesRef.current = []
+		xrGrabOffsetRef.current.set(0, 0, 0)
+		xrPreviousParticlePositionRef.current.set(0, 0, 0)
+		xrHasPreviousPositionRef.current = false
+		xrVelocitySampleCountRef.current = 0
+		xrVelocitySampleIndexRef.current = 0
 
 		//Mover la pelota a la posicion inicial
 		if (particleRef.current) {
@@ -310,6 +339,8 @@ useEffect(() => {
 
 		setInitialConditions(null)
 		setVhatMag(null)
+		simulationDebugRef.current = null
+		setSimulationDebug(null)
 
 		//Reiniciar estado del solver WASM con velocidad cero
 
@@ -426,12 +457,7 @@ useEffect(() => {
 		const theta = r0 > 1e-9 ? Math.acos(ry / r0) : 0
 		const phi0 = Math.atan2(rz, rx)
 
-//Evitar caso degenerado cerca del origen
-
-		if (r0 <= MIN_R0) {
-			console.warn('Invalido: Particula muy cerca al origen', { r0 })
-			return
-		}
+		// Rust conserva la autoridad para aceptar o rechazar el radio inicial.
 		clearTrail()
 		appendTrailPoint(p.x, p.y, p.z)
 
@@ -456,10 +482,15 @@ useEffect(() => {
 		vhat_z *= k
 	}
 		// Descomposición para el HUD; Rust realiza la misma proyección internamente.
-		const vhat_r = (vhat_x * rx + vhat_y * ry + vhat_z * rz) / r0
+		const vhat_r = r0 > 1e-12 ? (vhat_x * rx + vhat_y * ry + vhat_z * rz) / r0 : 0
 		const vhat_t = Math.sqrt(Math.max(0, vhat_x * vhat_x + vhat_y * vhat_y + vhat_z * vhat_z - vhat_r * vhat_r))
+		const inputSpeed = Math.hypot(vx, vy, vz)
+		const physicalSpeed = Math.hypot(vhat_x, vhat_y, vhat_z)
+		const alpha0 = physicalSpeed > 1e-12
+			? Math.acos(Math.max(-1, Math.min(1, vhat_r / physicalSpeed)))
+			: 0
 //Guardar |vhat| para visualizar validacion fisica en pantall
-		setVhatMag(Math.hypot(vhat_x, vhat_y, vhat_z))
+		setVhatMag(physicalSpeed)
 	
 
 
@@ -475,6 +506,22 @@ useEffect(() => {
 			//Activar avance continuo si Rust acepto las condiciones iniciales
 			simRunningRef.current = ok
 		}
+
+		// Guardar una fotografía completa de los valores enviados a Rust.
+		const debugData: SimulationDebug = {
+			r0,
+			position: [rx, ry, rz],
+			inputVelocity: [vx, vy, vz],
+			inputSpeed,
+			physicalVelocity: [vhat_x, vhat_y, vhat_z],
+			physicalSpeed,
+			alpha0,
+			currentR: r0,
+			radialVelocity: ok ? get_radial_velocity() : 0,
+			status: ok ? 'READY' : 'INVALID',
+		}
+		simulationDebugRef.current = debugData
+		setSimulationDebug(debugData)
 
 		//Probar un pequeno avance del solver
 		//if (ok && particleRef.current) {
@@ -494,7 +541,7 @@ useEffect(() => {
 			x: p.x, y: p.y, z: p.z,
 			rx, ry, rz, r0, phi0, theta,
 			vhat_x, vhat_y, vhat_z, vhat_r, vhat_t,
-			vhat: Math.hypot(vhat_x, vhat_y, vhat_z),
+			inputSpeed, physicalSpeed, alpha0,
 		})
 
 		return ok
@@ -509,62 +556,74 @@ useEffect(() => {
 		releaseParticle(position, new Vector3(velocity.vx, velocity.vy, velocity.vz))
 	}
 
+	const finishXRThrow = (hand: 'left' | 'right') => {
+		if (xrGrabbedHandRef.current !== hand || !particleRef.current) return
+
+		// Promediar el buffer circular que contiene las últimas velocidades medidas.
+		const averageVelocity = new Vector3()
+		const sampleCount = xrVelocitySampleCountRef.current
+		for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+			averageVelocity.add(xrVelocitySamplesRef.current[sampleIndex])
+		}
+		if (sampleCount > 0) averageVelocity.multiplyScalar(1 / sampleCount)
+
+		const releasePosition = particleRef.current.getWorldPosition(new Vector3())
+		console.log('XR release ->', {
+			hand,
+			sampleCount,
+			velocity: averageVelocity.toArray(),
+			speed: averageVelocity.length(),
+		})
+
+		// Limpiar el agarre antes de iniciar la nueva geodésica.
+		xrGrabbedHandRef.current = null
+		xrHasPreviousPositionRef.current = false
+		xrVelocitySampleCountRef.current = 0
+		xrVelocitySampleIndexRef.current = 0
+		releaseParticle(releasePosition, averageVelocity)
+	}
+
 	const XRThrowTracker = () => {
 		const leftController = useXRInputSourceState('controller', 'left')
 		const rightController = useXRInputSourceState('controller', 'right')
-		const controllerPositionRef = useRef(new Vector3())
-		const particlePositionRef = useRef(new Vector3())
+		const currentParticlePositionRef = useRef(new Vector3())
+
+		// selectend garantiza la suelta aunque el rayo ya no intersecte la esfera.
+		useXRInputSourceEvent(leftController?.inputSource, 'selectend', () => finishXRThrow('left'), [leftController])
+		useXRInputSourceEvent(rightController?.inputSource, 'selectend', () => finishXRThrow('right'), [rightController])
 
 		useFrame((_, delta) => {
-			const controllers = [
-				{ hand: 'left' as const, controller: leftController },
-				{ hand: 'right' as const, controller: rightController },
-			]
+			const grabbedHand = xrGrabbedHandRef.current
+			if (grabbedHand === null || !particleRef.current) return
 
-			for (const { hand, controller } of controllers) {
-				const triggerPressed = controller?.gamepad['xr-standard-trigger']?.state === 'pressed'
-				if (!controller?.object) continue
+			const controller = grabbedHand === 'left' ? leftController : rightController
+			if (!controller?.object) return
 
-				const controllerPosition = controller.object.getWorldPosition(controllerPositionRef.current)
-				const grabbedHand = xrGrabbedHandRef.current
+			// Mantener el desplazamiento remoto inicial respecto a la pose del mando.
+			controller.object.updateWorldMatrix(true, false)
+			const currentPosition = currentParticlePositionRef.current.copy(xrGrabOffsetRef.current)
+			controller.object.localToWorld(currentPosition)
+			particleRef.current.position.copy(currentPosition)
 
-				// Iniciar agarre solo si el controlador está cerca de la partícula.
-				if (grabbedHand === null && triggerPressed && particleRef.current) {
-					particleRef.current.getWorldPosition(particlePositionRef.current)
-					if (controllerPosition.distanceTo(particlePositionRef.current) <= XR_GRAB_DISTANCE) {
-						simRunningRef.current = false
-						xrGrabbedHandRef.current = hand
-						xrPreviousControllerPositionRef.current = controllerPosition.clone()
-						xrVelocitySamplesRef.current = []
-					}
-				}
-
-				if (xrGrabbedHandRef.current !== hand || !particleRef.current) continue
-
-				// Mientras se mantiene el gatillo, la pelota sigue la pose del controlador.
-				particleRef.current.position.copy(controllerPosition)
-				const previousPosition = xrPreviousControllerPositionRef.current
-				if (previousPosition && delta > 1e-4) {
-					const sample = controllerPosition.clone().sub(previousPosition).multiplyScalar(1 / delta)
-					const samples = xrVelocitySamplesRef.current
-					samples.push(sample)
-					if (samples.length > THROW_SAMPLE_COUNT) samples.shift()
-					previousPosition.copy(controllerPosition)
-				}
-
-				if (triggerPressed) continue
-
-				// Promediar pocas muestras reduce jitter sin retrasar apreciablemente el lanzamiento.
-				const samples = xrVelocitySamplesRef.current
-				const averageVelocity = new Vector3()
-				for (const sample of samples) averageVelocity.add(sample)
-				if (samples.length > 0) averageVelocity.multiplyScalar(1 / samples.length)
-
-				releaseParticle(controllerPosition.clone(), averageVelocity)
-				xrGrabbedHandRef.current = null
-				xrPreviousControllerPositionRef.current = null
-				xrVelocitySamplesRef.current = []
+			if (!xrHasPreviousPositionRef.current) {
+				xrPreviousParticlePositionRef.current.copy(currentPosition)
+				xrHasPreviousPositionRef.current = true
+				return
 			}
+
+			if (delta <= 1e-4) return
+
+			// Medir la velocidad de la partícula controlada, no la del puntero del navegador.
+			const sampleIndex = xrVelocitySampleIndexRef.current
+			xrVelocitySamplesRef.current[sampleIndex]
+				.subVectors(currentPosition, xrPreviousParticlePositionRef.current)
+				.multiplyScalar(1 / delta)
+			xrPreviousParticlePositionRef.current.copy(currentPosition)
+			xrVelocitySampleIndexRef.current = (sampleIndex + 1) % THROW_SAMPLE_COUNT
+			xrVelocitySampleCountRef.current = Math.min(
+				xrVelocitySampleCountRef.current + 1,
+				THROW_SAMPLE_COUNT,
+			)
 		})
 
 		return null
@@ -574,6 +633,39 @@ useEffect(() => {
 
 	const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
 		e.stopPropagation()
+
+		if (e.pointerType === 'ray') {
+			const pointerState = (e as unknown as { pointerState?: XRRayPointerState }).pointerState
+			const handedness = pointerState?.inputSource?.handedness
+			const controllerObject = pointerState?.object
+
+			if ((handedness !== 'left' && handedness !== 'right') || !controllerObject || !particleRef.current) {
+				console.warn('No se pudo iniciar el agarre XR', { handedness, controllerObject })
+				return
+			}
+
+			// El rayo selecciona desde lejos; se conserva la separación inicial al mando.
+			simRunningRef.current = false
+			draggingRef.current = false
+			xrGrabbedHandRef.current = handedness
+			controllerObject.updateWorldMatrix(true, false)
+			particleRef.current.getWorldPosition(xrPreviousParticlePositionRef.current)
+			xrGrabOffsetRef.current.copy(xrPreviousParticlePositionRef.current)
+			controllerObject.worldToLocal(xrGrabOffsetRef.current)
+			xrHasPreviousPositionRef.current = true
+			xrVelocitySampleCountRef.current = 0
+			xrVelocitySampleIndexRef.current = 0
+
+			const xrPointerTarget = e.target as unknown as { setPointerCapture?: (pointerId: number) => void }
+			xrPointerTarget.setPointerCapture?.(e.pointerId)
+			console.log('XR grab ->', { hand: handedness, pointerType: e.pointerType })
+			return
+		}
+
+		// El puntero grab corresponde al squeeze, reservado para controlar altura.
+		if (e.pointerType === 'grab') return
+
+		// Ruta desktop: conservar el comportamiento histórico del mouse.
 		draggingRef.current = true
 		const pointerTarget = e.target as EventTarget & { setPointerCapture?: (pointerId: number) => void }
 		pointerTarget.setPointerCapture?.(e.pointerId)
@@ -590,6 +682,7 @@ useEffect(() => {
 	}
 
 	const handlePointerMove = (e: ThreeEvent<PointerEvent>) => {
+		if (e.pointerType === 'ray' || e.pointerType === 'grab') return
 		if (!draggingRef.current || !particleRef.current) return
 			particleRef.current.position.x = e.point.x
 			particleRef.current.position.z = e.point.z
@@ -598,6 +691,19 @@ useEffect(() => {
 
 	const handlePointerUp = (e: ThreeEvent<PointerEvent>) => {
 		e.stopPropagation()
+
+		if (e.pointerType === 'ray') {
+			const pointerState = (e as unknown as { pointerState?: XRRayPointerState }).pointerState
+			const handedness = pointerState?.inputSource?.handedness
+			const xrPointerTarget = e.target as unknown as { releasePointerCapture?: (pointerId: number) => void }
+			xrPointerTarget.releasePointerCapture?.(e.pointerId)
+			if (handedness === 'left' || handedness === 'right') finishXRThrow(handedness)
+			return
+		}
+
+		if (e.pointerType === 'grab') return
+
+		// Ruta desktop: finalizar el lanzamiento medido con el mouse.
 		draggingRef.current = false
 		const pointerTarget = e.target as EventTarget & { releasePointerCapture?: (pointerId: number) => void }
 		pointerTarget.releasePointerCapture?.(e.pointerId)
@@ -610,7 +716,9 @@ useEffect(() => {
 	}
 
 	const SimulationStepper = () => {
-		useFrame(() => {
+		const hudUpdateAccumulatorRef = useRef(0)
+
+		useFrame((_, delta) => {
 		//Avanzar solo si WASM esta listo y la simulacion esta activa
 		if (!wasmReady || !simRunningRef.current || !particleRef.current) return
 
@@ -619,6 +727,7 @@ useEffect(() => {
 			const nextY = result[1]
 			const nextZ = result[2]
 			const captured = result[3] === 1
+			const captureReason = result[4]
 
 		// Rust devuelve posición relativa; Three.js usa posición absoluta de escena.
 		particleRef.current.position.set(
@@ -631,6 +740,23 @@ useEffect(() => {
 			BLACK_HOLE_POSITION.y + nextY,
 			BLACK_HOLE_POSITION.z + nextZ,
 		)
+
+		// Actualizar el HUD a 8 Hz para evitar renderizar React en cada frame XR.
+		hudUpdateAccumulatorRef.current += delta
+		if (hudUpdateAccumulatorRef.current >= 0.125 || captured) {
+			const previousDebug = simulationDebugRef.current
+			if (previousDebug) {
+				const nextDebug: SimulationDebug = {
+					...previousDebug,
+					currentR: Math.hypot(nextX, nextY, nextZ),
+					radialVelocity: get_radial_velocity(),
+					status: captured ? `CAPTURED (${captureReason})` : 'RUNNING',
+				}
+				simulationDebugRef.current = nextDebug
+				setSimulationDebug(nextDebug)
+			}
+			hudUpdateAccumulatorRef.current = 0
+		}
 
 		//Detiene el avanze si la particula fue capturada
 		if (captured) {
@@ -715,6 +841,30 @@ useEffect(() => {
 	return null
 	}
 
+	const formatVector = (vector: [number, number, number]) =>
+		`${vector[0].toFixed(3)} ${vector[1].toFixed(3)} ${vector[2].toFixed(3)}`
+
+	// Texto compartido por el HUD desktop y el HUD visible dentro del visor.
+	const hudText = simulationDebug
+		? [
+			'IC',
+			`r0: ${simulationDebug.r0.toFixed(3)}`,
+			`p0 xyz: ${formatVector(simulationDebug.position)}`,
+			`vin xyz: ${formatVector(simulationDebug.inputVelocity)}`,
+			`|vin|: ${simulationDebug.inputSpeed.toFixed(3)}`,
+			`vhat xyz: ${formatVector(simulationDebug.physicalVelocity)}`,
+			`|vhat|: ${simulationDebug.physicalSpeed.toFixed(3)}`,
+			`alpha0: ${simulationDebug.alpha0.toFixed(3)}`,
+			'NOW',
+			`r: ${simulationDebug.currentR.toFixed(3)}`,
+			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
+			`status: ${simulationDebug.status}`,
+			'version: 0.15',
+		].join('\n')
+		: initialConditions
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.15`
+			: 'Sin condiciones iniciales\nversion: 0.15'
+
 
 return (
 
@@ -744,17 +894,8 @@ return (
 			lineHeight: 1.4,
 		}}
 	>
-	{initialConditions ? (
-		<>
-		<div>r0: {initialConditions.r0.toFixed(3)}</div>
-		<div>phi0: {initialConditions.phi0.toFixed(3)}</div>
-		<div>|vhat|: {vhatMag !== null ? vhatMag.toFixed(3) : '0.000'}</div>
-		<div>wasm: {wasmReady ? 'ready' : 'loading'}</div>
-		</>
-
-	) : (
-	<div>Sin condiciones iniciales </div>
-	)}
+	<div style={{ whiteSpace: 'pre-line' }}>{hudText}</div>
+	<div>wasm: {wasmReady ? 'ready' : 'loading'}</div>
 	</div>
 
 
@@ -810,21 +951,20 @@ return (
 	<group position= {[-1.2, 1.4, -1.3]}>
 	{/* Fondo del HUD */}
 	<mesh>
-	<planeGeometry args={[0.90, 0.50]} />
+	<planeGeometry args={[1.55, 1.10]} />
 	<meshBasicMaterial color="black" transparent opacity={0.55} />
 	</mesh>
 
 {/* Texto del HUD */}
 	<Text
-		position={[-0.30, 0, 0.01]}
+		position={[-0.70, 0.48, 0.01]}
 		anchorX="left"
-		anchorY="middle"
-		fontSize={0.045}
+		anchorY="top"
+		fontSize={0.032}
+		maxWidth={1.40}
 		color="white"
 		>
-		{initialConditions
-			? `r0: ${initialConditions.r0.toFixed(3)}\nphi0 :${initialConditions.phi0.toFixed(3)}\n|v|: ${(vhatMag ?? 0).toFixed(3)}\n version: 0.16 `
-			: 'Sin condiciones \niniciales\n version: 0.16 '}
+		{hudText}
 			</Text>
 			</group>
 
