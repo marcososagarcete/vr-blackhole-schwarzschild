@@ -187,6 +187,8 @@ const XRLocomotion = () => {
 		)
 		const xrVelocitySampleCountRef = useRef(0)
 		const xrVelocitySampleIndexRef = useRef(0)
+		// Velocidad física candidata que se usaría si la pelota se soltara ahora.
+		const xrLivePhysicalVelocityRef = useRef(new Vector3())
 
 useEffect(() => {
 
@@ -328,6 +330,7 @@ useEffect(() => {
 		xrGrabOffsetRef.current.set(0, 0, 0)
 		xrPreviousParticlePositionRef.current.set(0, 0, 0)
 		xrPreviousRelativePositionRef.current.set(0, 0, 0)
+		xrLivePhysicalVelocityRef.current.set(0, 0, 0)
 		xrHasPreviousPositionRef.current = false
 		xrVelocitySampleCountRef.current = 0
 		xrVelocitySampleIndexRef.current = 0
@@ -582,6 +585,7 @@ useEffect(() => {
 		xrGrabbedHandRef.current = null
 		xrHasPreviousPositionRef.current = false
 		xrPreviousRelativePositionRef.current.set(0, 0, 0)
+		xrLivePhysicalVelocityRef.current.set(0, 0, 0)
 		xrVelocitySampleCountRef.current = 0
 		xrVelocitySampleIndexRef.current = 0
 		releaseParticle(releasePosition, averageVelocity)
@@ -631,6 +635,20 @@ useEffect(() => {
 				.multiplyScalar(1 / delta)
 			xrPreviousParticlePositionRef.current.copy(currentPosition)
 			xrPreviousRelativePositionRef.current.copy(currentRelativePosition)
+
+			// El HUD muestra la misma velocidad física que se usaría al soltar:
+			// primero se aplica la escala y después el límite relativista.
+			const liveVelocity = xrLivePhysicalVelocityRef.current.set(0, 0, 0)
+			const sampleCount = xrVelocitySampleCountRef.current
+			for (let index = 0; index < sampleCount; index += 1) {
+				liveVelocity.add(xrVelocitySamplesRef.current[index])
+			}
+			if (sampleCount > 0) liveVelocity.multiplyScalar(0.2 / sampleCount)
+			const liveSpeedSquared = liveVelocity.lengthSq()
+			const maxPhysicalSpeed = 0.99
+			if (liveSpeedSquared > maxPhysicalSpeed * maxPhysicalSpeed) {
+				liveVelocity.multiplyScalar(maxPhysicalSpeed / Math.sqrt(liveSpeedSquared))
+			}
 			xrVelocitySampleIndexRef.current = (sampleIndex + 1) % THROW_SAMPLE_COUNT
 			xrVelocitySampleCountRef.current = Math.min(
 				xrVelocitySampleCountRef.current + 1,
@@ -639,6 +657,73 @@ useEffect(() => {
 		})
 
 		return null
+	}
+
+	const XRDiagnosticsHud = () => {
+		const { camera, gl } = useThree()
+		const hudGroupRef = useRef<Group>(null)
+		const cameraPositionRef = useRef(new Vector3())
+		const cameraQuaternionRef = useRef(camera.quaternion.clone())
+		// Desplazamiento moderado para mantener el HUD dentro del campo de visión.
+		const hudOffsetRef = useRef(new Vector3(-0.24, 0.18, -0.65))
+		const hudWorldOffsetRef = useRef(new Vector3())
+		const updateAccumulatorRef = useRef(0)
+		const [snapshot, setSnapshot] = useState({
+			camera: [0, 0, 0] as [number, number, number],
+			velocity: [0, 0, 0] as [number, number, number],
+		})
+
+		useFrame((_, delta) => {
+			if (!hudGroupRef.current) return
+			// Este HUD es exclusivo de XR; el HUD desktop estático permanece intacto.
+			hudGroupRef.current.visible = gl.xr.isPresenting
+			if (!gl.xr.isPresenting) return
+
+			// Seguir la posición y orientación de la cámara del visor.
+			camera.getWorldPosition(cameraPositionRef.current)
+			camera.getWorldQuaternion(cameraQuaternionRef.current)
+			hudGroupRef.current.quaternion.copy(cameraQuaternionRef.current)
+			hudGroupRef.current.position
+				.copy(cameraPositionRef.current)
+				.add(hudWorldOffsetRef.current.copy(hudOffsetRef.current).applyQuaternion(cameraQuaternionRef.current))
+
+			// Actualizar el texto a 8 Hz para evitar renders de React en cada frame.
+			updateAccumulatorRef.current += delta
+			if (updateAccumulatorRef.current < 0.125) return
+			updateAccumulatorRef.current = 0
+
+			const releasedVelocity = simulationDebugRef.current?.physicalVelocity ?? [0, 0, 0]
+			const velocity = xrGrabbedHandRef.current
+				? xrLivePhysicalVelocityRef.current.toArray() as [number, number, number]
+				: releasedVelocity
+			setSnapshot({
+				camera: [
+					cameraPositionRef.current.x,
+					cameraPositionRef.current.y,
+					cameraPositionRef.current.z,
+				],
+				velocity,
+			})
+		})
+
+		return (
+			<group ref={hudGroupRef} visible={false}>
+				<mesh position={[0, 0, -0.01]}>
+					<planeGeometry args={[0.56, 0.18]} />
+					<meshBasicMaterial color="black" transparent opacity={0.60} />
+				</mesh>
+				<Text
+					position={[-0.25, 0.065, 0]}
+					anchorX="left"
+					anchorY="top"
+					fontSize={0.026}
+					lineHeight={1.25}
+					color="white"
+				>
+					{`CAM ${snapshot.camera.map(value => value.toFixed(2)).join(' ')}\nV0  ${snapshot.velocity.map(value => value.toFixed(3)).join(' ')}`}
+				</Text>
+			</group>
+		)
 	}
 
 	
@@ -672,6 +757,7 @@ useEffect(() => {
 			xrHasPreviousPositionRef.current = true
 			xrVelocitySampleCountRef.current = 0
 			xrVelocitySampleIndexRef.current = 0
+			xrLivePhysicalVelocityRef.current.set(0, 0, 0)
 
 			const xrPointerTarget = e.target as unknown as { setPointerCapture?: (pointerId: number) => void }
 			xrPointerTarget.setPointerCapture?.(e.pointerId)
@@ -876,11 +962,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.18',
+			'version: 0.20',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.18`
-			: 'Sin condiciones iniciales\nversion: 0.18'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.20`
+			: 'Sin condiciones iniciales\nversion: 0.20'
 
 
 return (
@@ -926,6 +1012,7 @@ return (
 	<XROrigin ref={xrOriginRef} />
 	<XRLocomotion />
 	<XRThrowTracker />
+	<XRDiagnosticsHud />
 
 	{/* Para hacer reset con el boton a del metaquest */}
 
