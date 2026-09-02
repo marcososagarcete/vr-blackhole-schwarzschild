@@ -179,6 +179,8 @@ const XRLocomotion = () => {
 		const xrGrabbedHandRef = useRef<'left' | 'right' | null>(null)
 		const xrGrabOffsetRef = useRef(new Vector3())
 		const xrPreviousParticlePositionRef = useRef(new Vector3())
+		// Posición anterior respecto al jugador, sin incluir el movimiento del XROrigin.
+		const xrPreviousRelativePositionRef = useRef(new Vector3())
 		const xrHasPreviousPositionRef = useRef(false)
 		const xrVelocitySamplesRef = useRef(
 			Array.from({ length: THROW_SAMPLE_COUNT }, () => new Vector3()),
@@ -325,6 +327,7 @@ useEffect(() => {
 		xrGrabbedHandRef.current = null
 		xrGrabOffsetRef.current.set(0, 0, 0)
 		xrPreviousParticlePositionRef.current.set(0, 0, 0)
+		xrPreviousRelativePositionRef.current.set(0, 0, 0)
 		xrHasPreviousPositionRef.current = false
 		xrVelocitySampleCountRef.current = 0
 		xrVelocitySampleIndexRef.current = 0
@@ -578,6 +581,7 @@ useEffect(() => {
 		// Limpiar el agarre antes de iniciar la nueva geodésica.
 		xrGrabbedHandRef.current = null
 		xrHasPreviousPositionRef.current = false
+		xrPreviousRelativePositionRef.current.set(0, 0, 0)
 		xrVelocitySampleCountRef.current = 0
 		xrVelocitySampleIndexRef.current = 0
 		releaseParticle(releasePosition, averageVelocity)
@@ -587,6 +591,7 @@ useEffect(() => {
 		const leftController = useXRInputSourceState('controller', 'left')
 		const rightController = useXRInputSourceState('controller', 'right')
 		const currentParticlePositionRef = useRef(new Vector3())
+		const currentRelativePositionRef = useRef(new Vector3())
 
 		// selectend garantiza la suelta aunque el rayo ya no intersecte la esfera.
 		useXRInputSourceEvent(leftController?.inputSource, 'selectend', () => finishXRThrow('left'), [leftController])
@@ -613,12 +618,19 @@ useEffect(() => {
 
 			if (delta <= 1e-4) return
 
-			// Medir la velocidad de la partícula controlada, no la del puntero del navegador.
+			// Medir la velocidad relativa al jugador, no la del puntero ni la del mundo.
+			// Caminar o girar el XROrigin mueve la escena completa, pero no debe crear
+			// una velocidad inicial si la muñeca permanece quieta.
+			xrOriginRef.current?.updateWorldMatrix(true, false)
+			const currentRelativePosition = currentRelativePositionRef.current.copy(currentPosition)
+			if (xrOriginRef.current) xrOriginRef.current.worldToLocal(currentRelativePosition)
+
 			const sampleIndex = xrVelocitySampleIndexRef.current
 			xrVelocitySamplesRef.current[sampleIndex]
-				.subVectors(currentPosition, xrPreviousParticlePositionRef.current)
+				.subVectors(currentRelativePosition, xrPreviousRelativePositionRef.current)
 				.multiplyScalar(1 / delta)
 			xrPreviousParticlePositionRef.current.copy(currentPosition)
+			xrPreviousRelativePositionRef.current.copy(currentRelativePosition)
 			xrVelocitySampleIndexRef.current = (sampleIndex + 1) % THROW_SAMPLE_COUNT
 			xrVelocitySampleCountRef.current = Math.min(
 				xrVelocitySampleCountRef.current + 1,
@@ -639,7 +651,7 @@ useEffect(() => {
 			const handedness = pointerState?.inputSource?.handedness
 			const controllerObject = pointerState?.object
 
-			if ((handedness !== 'left' && handedness !== 'right') || !controllerObject || !particleRef.current) {
+			if ((handedness !== 'left' && handedness !== 'right') || !controllerObject || !particleRef.current || !xrOriginRef.current) {
 				console.warn('No se pudo iniciar el agarre XR', { handedness, controllerObject })
 				return
 			}
@@ -650,6 +662,11 @@ useEffect(() => {
 			xrGrabbedHandRef.current = handedness
 			controllerObject.updateWorldMatrix(true, false)
 			particleRef.current.getWorldPosition(xrPreviousParticlePositionRef.current)
+			// Inicializar la referencia en el espacio del jugador para ignorar
+			// cualquier desplazamiento acumulado al caminar hasta otra posición.
+			xrOriginRef.current.updateWorldMatrix(true, false)
+			xrPreviousRelativePositionRef.current.copy(xrPreviousParticlePositionRef.current)
+			xrOriginRef.current.worldToLocal(xrPreviousRelativePositionRef.current)
 			xrGrabOffsetRef.current.copy(xrPreviousParticlePositionRef.current)
 			controllerObject.worldToLocal(xrGrabOffsetRef.current)
 			xrHasPreviousPositionRef.current = true
@@ -859,11 +876,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.17',
+			'version: 0.18',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.17`
-			: 'Sin condiciones iniciales\nversion: 0.17'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.18`
+			: 'Sin condiciones iniciales\nversion: 0.18'
 
 
 return (
