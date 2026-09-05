@@ -664,8 +664,10 @@ useEffect(() => {
 		const hudGroupRef = useRef<Group>(null)
 		const cameraPositionRef = useRef(new Vector3())
 		const cameraQuaternionRef = useRef(camera.quaternion.clone())
+
 		// Desplazamiento moderado para mantener el HUD dentro del campo de visión.
-		const hudOffsetRef = useRef(new Vector3(-0.24, 0.18, -0.65))
+		
+		const hudOffsetRef = useRef(new Vector3(-0.10, 0.10, -0.65))
 		const hudWorldOffsetRef = useRef(new Vector3())
 		const updateAccumulatorRef = useRef(0)
 		const [snapshot, setSnapshot] = useState({
@@ -962,11 +964,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.20',
+			'version: 0.21',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.20`
-			: 'Sin condiciones iniciales\nversion: 0.20'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.21`
+			: 'Sin condiciones iniciales\nversion: 0.21'
 
 
 return (
