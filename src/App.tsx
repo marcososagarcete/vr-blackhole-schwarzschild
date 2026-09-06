@@ -189,6 +189,11 @@ const XRLocomotion = () => {
 		const xrVelocitySampleIndexRef = useRef(0)
 		// Velocidad física candidata que se usaría si la pelota se soltara ahora.
 		const xrLivePhysicalVelocityRef = useRef(new Vector3())
+		// Instrumentación temporal para comparar la última muestra, el promedio y el envío.
+		const xrLastPhysicalVelocityRef = useRef(new Vector3())
+		const xrSentPhysicalVelocityRef = useRef(new Vector3())
+		const xrSentSampleCountRef = useRef(0)
+		const xrSentSampleIndexRef = useRef(0)
 
 useEffect(() => {
 
@@ -331,6 +336,10 @@ useEffect(() => {
 		xrPreviousParticlePositionRef.current.set(0, 0, 0)
 		xrPreviousRelativePositionRef.current.set(0, 0, 0)
 		xrLivePhysicalVelocityRef.current.set(0, 0, 0)
+		xrLastPhysicalVelocityRef.current.set(0, 0, 0)
+		xrSentPhysicalVelocityRef.current.set(0, 0, 0)
+		xrSentSampleCountRef.current = 0
+		xrSentSampleIndexRef.current = 0
 		xrHasPreviousPositionRef.current = false
 		xrVelocitySampleCountRef.current = 0
 		xrVelocitySampleIndexRef.current = 0
@@ -585,10 +594,21 @@ useEffect(() => {
 		xrGrabbedHandRef.current = null
 		xrHasPreviousPositionRef.current = false
 		xrPreviousRelativePositionRef.current.set(0, 0, 0)
-		xrLivePhysicalVelocityRef.current.set(0, 0, 0)
+		// Conservar el promedio físico que se acaba de enviar para compararlo en el HUD.
+		xrLivePhysicalVelocityRef.current.copy(averageVelocity).multiplyScalar(0.2)
+		const sentAverageSpeedSquared = xrLivePhysicalVelocityRef.current.lengthSq()
+		if (sentAverageSpeedSquared > 0.99 * 0.99) {
+			xrLivePhysicalVelocityRef.current.multiplyScalar(0.99 / Math.sqrt(sentAverageSpeedSquared))
+		}
+		xrSentSampleCountRef.current = sampleCount
+		xrSentSampleIndexRef.current = xrVelocitySampleIndexRef.current
 		xrVelocitySampleCountRef.current = 0
 		xrVelocitySampleIndexRef.current = 0
 		releaseParticle(releasePosition, averageVelocity)
+		// Guardar la velocidad física exacta que releaseParticle registró para Rust.
+		if (simulationDebugRef.current) {
+			xrSentPhysicalVelocityRef.current.fromArray(simulationDebugRef.current.physicalVelocity)
+		}
 	}
 
 	const XRThrowTracker = () => {
@@ -636,6 +656,16 @@ useEffect(() => {
 			xrPreviousParticlePositionRef.current.copy(currentPosition)
 			xrPreviousRelativePositionRef.current.copy(currentRelativePosition)
 
+			// Convertir la última muestra a la misma velocidad física que usa el HUD.
+			const lastPhysicalVelocity = xrLastPhysicalVelocityRef.current.copy(
+				xrVelocitySamplesRef.current[sampleIndex],
+			).multiplyScalar(0.2)
+			const lastSpeedSquared = lastPhysicalVelocity.lengthSq()
+			const maxPhysicalSpeed = 0.99
+			if (lastSpeedSquared > maxPhysicalSpeed * maxPhysicalSpeed) {
+				lastPhysicalVelocity.multiplyScalar(maxPhysicalSpeed / Math.sqrt(lastSpeedSquared))
+			}
+
 			// El HUD muestra la misma velocidad física que se usaría al soltar:
 			// primero se aplica la escala y después el límite relativista.
 			const liveVelocity = xrLivePhysicalVelocityRef.current.set(0, 0, 0)
@@ -645,7 +675,6 @@ useEffect(() => {
 			}
 			if (sampleCount > 0) liveVelocity.multiplyScalar(0.2 / sampleCount)
 			const liveSpeedSquared = liveVelocity.lengthSq()
-			const maxPhysicalSpeed = 0.99
 			if (liveSpeedSquared > maxPhysicalSpeed * maxPhysicalSpeed) {
 				liveVelocity.multiplyScalar(maxPhysicalSpeed / Math.sqrt(liveSpeedSquared))
 			}
@@ -673,6 +702,11 @@ useEffect(() => {
 		const [snapshot, setSnapshot] = useState({
 			camera: [0, 0, 0] as [number, number, number],
 			velocity: [0, 0, 0] as [number, number, number],
+			last: [0, 0, 0] as [number, number, number],
+			average: [0, 0, 0] as [number, number, number],
+			sent: [0, 0, 0] as [number, number, number],
+			sampleCount: 0,
+			sampleIndex: 0,
 		})
 
 		useFrame((_, delta) => {
@@ -705,24 +739,40 @@ useEffect(() => {
 					cameraPositionRef.current.z,
 				],
 				velocity,
+				last: xrLastPhysicalVelocityRef.current.toArray() as [number, number, number],
+				average: xrLivePhysicalVelocityRef.current.toArray() as [number, number, number],
+				sent: xrSentPhysicalVelocityRef.current.toArray() as [number, number, number],
+				sampleCount: xrGrabbedHandRef.current
+					? xrVelocitySampleCountRef.current
+					: xrSentSampleCountRef.current,
+				sampleIndex: xrGrabbedHandRef.current
+					? xrVelocitySampleIndexRef.current
+					: xrSentSampleIndexRef.current,
 			})
 		})
 
 		return (
 			<group ref={hudGroupRef} visible={false}>
 				<mesh position={[0, 0, -0.01]}>
-					<planeGeometry args={[0.56, 0.18]} />
+					<planeGeometry args={[0.72, 0.34]} />
 					<meshBasicMaterial color="black" transparent opacity={0.60} />
 				</mesh>
 				<Text
-					position={[-0.25, 0.065, 0]}
+					position={[-0.33, 0.155, 0]}
 					anchorX="left"
 					anchorY="top"
-					fontSize={0.026}
-					lineHeight={1.25}
+					fontSize={0.018}
+					lineHeight={1.15}
 					color="white"
 				>
-					{`CAM ${snapshot.camera.map(value => value.toFixed(2)).join(' ')}\nV0  ${snapshot.velocity.map(value => value.toFixed(3)).join(' ')}`}
+					{[
+						`CAM ${snapshot.camera.map(value => value.toFixed(2)).join(' ')}`,
+						`V0  ${snapshot.velocity.map(value => value.toFixed(3)).join(' ')}`,
+						`LST ${snapshot.last.map(value => value.toFixed(3)).join(' ')}`,
+						`AVG ${snapshot.average.map(value => value.toFixed(3)).join(' ')}`,
+						`SND ${snapshot.sent.map(value => value.toFixed(3)).join(' ')}`,
+						`N ${snapshot.sampleCount}/4  IDX ${snapshot.sampleIndex}`,
+					].join('\n')}
 				</Text>
 			</group>
 		)
@@ -760,6 +810,7 @@ useEffect(() => {
 			xrVelocitySampleCountRef.current = 0
 			xrVelocitySampleIndexRef.current = 0
 			xrLivePhysicalVelocityRef.current.set(0, 0, 0)
+			xrLastPhysicalVelocityRef.current.set(0, 0, 0)
 
 			const xrPointerTarget = e.target as unknown as { setPointerCapture?: (pointerId: number) => void }
 			xrPointerTarget.setPointerCapture?.(e.pointerId)
@@ -964,11 +1015,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.21',
+			'version: 0.23',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.21`
-			: 'Sin condiciones iniciales\nversion: 0.21'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.23`
+			: 'Sin condiciones iniciales\nversion: 0.23'
 
 
 return (
