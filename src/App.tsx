@@ -2,7 +2,7 @@ import './App.css'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import {  XR, createXRStore, XROrigin, useXRInputSourceEvent, useXRInputSourceState } from '@react-three/xr'
 import { useRef, useState, useEffect } from 'react'
-import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, Line as ThreeLine, LineBasicMaterial, Mesh, Object3D, Vector3 } from 'three'
+import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, Line as ThreeLine, LineBasicMaterial, Mesh, Object3D, Quaternion, Vector3 } from 'three'
 import type { ThreeEvent } from '@react-three/fiber'
 import { Text } from '@react-three/drei'
 import initWasm, { get_radial_velocity, set_params, set_initial, set_initial_3d, step } from './wasm-core/wasm_core'
@@ -10,7 +10,12 @@ const xrStore = createXRStore()
 
 const BLACK_HOLE_POSITION = { x: 0, y: 1.4, z: 0 }
 const TRAIL_MAX_POINTS = 10_000
-const THROW_SAMPLE_COUNT = 4
+const THROW_SAMPLE_CAPACITY = 24
+const THROW_SAMPLE_WINDOW_SECONDS = 0.12
+const THROW_RELEASE_GUARD_SECONDS = 0.04
+const THROW_MIN_SAMPLE_SPAN_SECONDS = 0.025
+const INPUT_TO_PHYSICAL_SCALE = 0.2
+const MAX_PHYSICAL_SPEED = 0.99
 
 type InitialConditions = {
 	r0: number
@@ -35,6 +40,23 @@ type SimulationDebug = {
 type XRRayPointerState = {
 	inputSource?: { handedness?: string }
 	object?: Object3D
+}
+
+type XRThrowPhase = 'idle' | 'grabbed' | 'released'
+
+type XRPositionSample = {
+	time: number
+	position: Vector3
+}
+
+// Aplicar en un único lugar la calibración y el límite usados por el HUD y Rust.
+function copyPhysicalVelocity(inputVelocity: Vector3, target: Vector3) {
+	target.copy(inputVelocity).multiplyScalar(INPUT_TO_PHYSICAL_SCALE)
+	const speedSquared = target.lengthSq()
+	if (speedSquared > MAX_PHYSICAL_SPEED * MAX_PHYSICAL_SPEED) {
+		target.multiplyScalar(MAX_PHYSICAL_SPEED / Math.sqrt(speedSquared))
+	}
+	return target
 }
 
 function XRResetButton({ onReset }: { onReset: () => void }) {
@@ -151,8 +173,6 @@ const XRLocomotion = () => {
 	// Referencia al origen del jugador en XR
 	const xrOriginRef = useRef<Group>(null)
 
-	const draggingRef = useRef(false)
-
 	//Indica si la simulacion debe avanza en cada frame
 	const simRunningRef = useRef(false)
 
@@ -169,24 +189,27 @@ const XRLocomotion = () => {
 
 
 
-//Ultima muestra de posicion/tiempo para derivar velocidad
-	const lastSampleRef = useRef<{ x: number; y: number; z: number; t: number } | null>(null)
-
-//Velocidad instantanea 3D al soltar.
-	const releaseVelocityRef = useRef<{ vx: number; vy: number; vz: number }>({ vx: 0, vy: 0, vz: 0})
-
-		// Estado del agarre remoto y del muestreo físico del lanzamiento XR.
+		// Estado único del agarre y estimador temporal del lanzamiento XR.
+		const xrThrowPhaseRef = useRef<XRThrowPhase>('idle')
+		const xrGrabIdRef = useRef(0)
 		const xrGrabbedHandRef = useRef<'left' | 'right' | null>(null)
 		const xrGrabOffsetRef = useRef(new Vector3())
 		const xrPreviousParticlePositionRef = useRef(new Vector3())
-		// Posición anterior respecto al jugador, sin incluir el movimiento del XROrigin.
 		const xrPreviousRelativePositionRef = useRef(new Vector3())
+		const xrPreviousSampleTimeRef = useRef(0)
 		const xrHasPreviousPositionRef = useRef(false)
-		const xrVelocitySamplesRef = useRef(
-			Array.from({ length: THROW_SAMPLE_COUNT }, () => new Vector3()),
+		const xrPositionSamplesRef = useRef<XRPositionSample[]>(
+			Array.from({ length: THROW_SAMPLE_CAPACITY }, () => ({
+				time: Number.NEGATIVE_INFINITY,
+				position: new Vector3(),
+			})),
 		)
 		const xrVelocitySampleCountRef = useRef(0)
 		const xrVelocitySampleIndexRef = useRef(0)
+		const xrEstimateSampleCountRef = useRef(0)
+		const xrEstimatedVelocityLocalRef = useRef(new Vector3())
+		const xrOriginQuaternionRef = useRef(new Quaternion())
+		const xrLiveInputVelocityWorldRef = useRef(new Vector3())
 		// Velocidad física candidata que se usaría si la pelota se soltara ahora.
 		const xrLivePhysicalVelocityRef = useRef(new Vector3())
 		// Instrumentación temporal para comparar la última muestra, el promedio y el envío.
@@ -195,35 +218,17 @@ const XRLocomotion = () => {
 		const xrSentSampleCountRef = useRef(0)
 		const xrSentSampleIndexRef = useRef(0)
 
-useEffect(() => {
-
-	
-	const onPointerMove = (_e: PointerEvent) => {
-		//Medir si estamos arrastrando y existe la pelota
-		if (!draggingRef.current || !particleRef.current) return
-	const now = performance.now()
-	const position = particleRef.current.getWorldPosition(new Vector3())
-	
-	const prev = lastSampleRef.current
-	if (prev) {
-		// dt en segundos para calcular la velocidad de flick en 3D.
-		const dt = (now - prev.t) / 1000
-		if (dt > 1e-4) {
-			releaseVelocityRef.current = {
-				vx: (position.x - prev.x) / dt,
-				vy: (position.y - prev.y) / dt,
-				vz: (position.z - prev.z) / dt,
-			}
+	const clearXRThrowSamples = () => {
+		for (const sample of xrPositionSamplesRef.current) {
+			sample.time = Number.NEGATIVE_INFINITY
+			sample.position.set(0, 0, 0)
 		}
+		xrVelocitySampleCountRef.current = 0
+		xrVelocitySampleIndexRef.current = 0
+		xrEstimateSampleCountRef.current = 0
+		xrPreviousSampleTimeRef.current = 0
+		xrHasPreviousPositionRef.current = false
 	}
-//Guardar muestra actual para la siguiente derivada
-	lastSampleRef.current = { x: position.x, y: position.y, z: position.z, t: now }
-	}
-
-//Listener globar para capturar movimiento continuo
-	window.addEventListener('pointermove', onPointerMove)
-	return () => window.removeEventListener('pointermove', onPointerMove)
-}, [])
 
 // Cargar el modulo Rust/WASM una sola vez al iniciar React
 useEffect(() => {
@@ -327,22 +332,19 @@ useEffect(() => {
 		// Detener la simulacion actual
 		simRunningRef.current = false 
 
-		//Reiniciar velocidad media por el flick (tal vez sea necesario editar luego)
-		releaseVelocityRef.current = { vx: 0, vy: 0, vz: 0}
-		lastSampleRef.current = null
-		// Limpiar muestras XR antes del próximo lanzamiento con controlador.
+		// Limpiar por completo el ciclo XR antes del próximo lanzamiento.
+		xrThrowPhaseRef.current = 'idle'
 		xrGrabbedHandRef.current = null
 		xrGrabOffsetRef.current.set(0, 0, 0)
 		xrPreviousParticlePositionRef.current.set(0, 0, 0)
 		xrPreviousRelativePositionRef.current.set(0, 0, 0)
+		xrLiveInputVelocityWorldRef.current.set(0, 0, 0)
 		xrLivePhysicalVelocityRef.current.set(0, 0, 0)
 		xrLastPhysicalVelocityRef.current.set(0, 0, 0)
 		xrSentPhysicalVelocityRef.current.set(0, 0, 0)
 		xrSentSampleCountRef.current = 0
 		xrSentSampleIndexRef.current = 0
-		xrHasPreviousPositionRef.current = false
-		xrVelocitySampleCountRef.current = 0
-		xrVelocitySampleIndexRef.current = 0
+		clearXRThrowSamples()
 
 		//Mover la pelota a la posicion inicial
 		if (particleRef.current) {
@@ -459,7 +461,83 @@ useEffect(() => {
 	}
 
 
-	// Ruta común: desktop y XR entregarán aquí su posición y velocidad de entrada.
+	const updateXRThrowEstimate = (now: number) => {
+		const xrOrigin = xrOriginRef.current
+		if (!xrOrigin) return
+
+		// La ventana termina antes del instante actual para ignorar la perturbación
+		// mecánica que puede producir el dedo al liberar el gatillo.
+		const endTime = now - THROW_RELEASE_GUARD_SECONDS
+		const startTime = endTime - THROW_SAMPLE_WINDOW_SECONDS
+		let count = 0
+		let meanTime = 0
+		let meanX = 0
+		let meanY = 0
+		let meanZ = 0
+		let firstTime = Number.POSITIVE_INFINITY
+		let lastTime = Number.NEGATIVE_INFINITY
+
+		for (const sample of xrPositionSamplesRef.current) {
+			if (sample.time < startTime || sample.time > endTime) continue
+			count += 1
+			meanTime += sample.time
+			meanX += sample.position.x
+			meanY += sample.position.y
+			meanZ += sample.position.z
+			firstTime = Math.min(firstTime, sample.time)
+			lastTime = Math.max(lastTime, sample.time)
+		}
+
+		xrEstimateSampleCountRef.current = count
+		const estimatedLocalVelocity = xrEstimatedVelocityLocalRef.current.set(0, 0, 0)
+		if (count < 2 || lastTime - firstTime < THROW_MIN_SAMPLE_SPAN_SECONDS) {
+			xrLiveInputVelocityWorldRef.current.set(0, 0, 0)
+			xrLivePhysicalVelocityRef.current.set(0, 0, 0)
+			return
+		}
+
+		meanTime /= count
+		meanX /= count
+		meanY /= count
+		meanZ /= count
+		let denominator = 0
+		let numeratorX = 0
+		let numeratorY = 0
+		let numeratorZ = 0
+
+		// Regresión lineal: estima una velocidad suave usando posiciones y tiempo real.
+		for (const sample of xrPositionSamplesRef.current) {
+			if (sample.time < startTime || sample.time > endTime) continue
+			const centeredTime = sample.time - meanTime
+			denominator += centeredTime * centeredTime
+			numeratorX += centeredTime * (sample.position.x - meanX)
+			numeratorY += centeredTime * (sample.position.y - meanY)
+			numeratorZ += centeredTime * (sample.position.z - meanZ)
+		}
+
+		if (denominator <= 1e-9) {
+			xrLiveInputVelocityWorldRef.current.set(0, 0, 0)
+			xrLivePhysicalVelocityRef.current.set(0, 0, 0)
+			return
+		}
+
+		estimatedLocalVelocity.set(
+			numeratorX / denominator,
+			numeratorY / denominator,
+			numeratorZ / denominator,
+		)
+
+		// La estimación elimina la locomoción en espacio local. Antes de enviarla
+		// a Rust se rota nuevamente a los ejes mundiales, sin aplicar traslación.
+		xrOrigin.updateWorldMatrix(true, false)
+		xrOrigin.getWorldQuaternion(xrOriginQuaternionRef.current)
+		xrLiveInputVelocityWorldRef.current
+			.copy(estimatedLocalVelocity)
+			.applyQuaternion(xrOriginQuaternionRef.current)
+		copyPhysicalVelocity(xrLiveInputVelocityWorldRef.current, xrLivePhysicalVelocityRef.current)
+	}
+
+	// Ruta común: la estimación XR entrega posición y velocidad mundiales.
 	const releaseParticle = (p: Vector3, inputVelocity: Vector3) => {
 		// Detener una simulación anterior antes de aceptar un lanzamiento nuevo.
 		simRunningRef.current = false
@@ -481,21 +559,11 @@ useEffect(() => {
 		const vy = inputVelocity.y
 		const vz = inputVelocity.z
 
-//Escala de calibracion: convierte input del control a velocidad fisica local
-	const S = 0.2
-	let vhat_x = S * vx
-	let vhat_y = S * vy
-	let vhat_z = S * vz
-
-//Clamp relativista: mantener |vhat| < (unidades naturales c=1)
-	const VMAX = 0.99
-	const vhat2 = vhat_x * vhat_x + vhat_y * vhat_y + vhat_z * vhat_z
-	if (vhat2 > VMAX * VMAX) {
-		const k = VMAX/ Math.sqrt(vhat2)
-		vhat_x *= k
-		vhat_y *= k
-		vhat_z *= k
-	}
+		// HUD y Rust usan exactamente la misma calibración y el mismo límite.
+		const physicalVelocity = copyPhysicalVelocity(inputVelocity, new Vector3())
+		const vhat_x = physicalVelocity.x
+		const vhat_y = physicalVelocity.y
+		const vhat_z = physicalVelocity.z
 		// Descomposición para el HUD; Rust realiza la misma proyección internamente.
 		const vhat_r = r0 > 1e-12 ? (vhat_x * rx + vhat_y * ry + vhat_z * rz) / r0 : 0
 		const vhat_t = Math.sqrt(Math.max(0, vhat_x * vhat_x + vhat_y * vhat_y + vhat_z * vhat_z - vhat_r * vhat_r))
@@ -562,50 +630,38 @@ useEffect(() => {
 		return ok
 	}
 
-	// Adaptador de desktop: conserva el mouse como fuente de posición y velocidad.
-	const handleParticleRelease = () => {
-//Si no hay referencia a la pelota, no se hace nada	
-		if (!particleRef.current) return
-		const position = particleRef.current.getWorldPosition(new Vector3())
-		const velocity = releaseVelocityRef.current
-		releaseParticle(position, new Vector3(velocity.vx, velocity.vy, velocity.vz))
-	}
-
 	const finishXRThrow = (hand: 'left' | 'right') => {
-		if (xrGrabbedHandRef.current !== hand || !particleRef.current) return
+		if (
+			xrThrowPhaseRef.current !== 'grabbed'
+			|| xrGrabbedHandRef.current !== hand
+			|| !particleRef.current
+		) return
 
-		// Promediar el buffer circular que contiene las últimas velocidades medidas.
-		const averageVelocity = new Vector3()
-		const sampleCount = xrVelocitySampleCountRef.current
-		for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
-			averageVelocity.add(xrVelocitySamplesRef.current[sampleIndex])
-		}
-		if (sampleCount > 0) averageVelocity.multiplyScalar(1 / sampleCount)
-
+		// Congelar el último candidato estable: al soltar no se vuelve a medir ni promediar.
 		const releasePosition = particleRef.current.getWorldPosition(new Vector3())
-		console.log('XR release ->', {
+		const releaseVelocityWorld = xrLiveInputVelocityWorldRef.current.clone()
+		const releasePhysicalVelocity = xrLivePhysicalVelocityRef.current.clone()
+		const estimateSampleCount = xrEstimateSampleCountRef.current
+		const sampleIndex = xrVelocitySampleIndexRef.current
+
+		// La transición ocurre antes de llamar a Rust y bloquea una segunda liberación.
+		xrThrowPhaseRef.current = 'released'
+		xrGrabbedHandRef.current = null
+		xrSentSampleCountRef.current = estimateSampleCount
+		xrSentSampleIndexRef.current = sampleIndex
+		xrSentPhysicalVelocityRef.current.copy(releasePhysicalVelocity)
+		clearXRThrowSamples()
+
+		console.log('XR release snapshot ->', {
+			grabId: xrGrabIdRef.current,
 			hand,
-			sampleCount,
-			velocity: averageVelocity.toArray(),
-			speed: averageVelocity.length(),
+			estimateSampleCount,
+			inputVelocityWorld: releaseVelocityWorld.toArray(),
+			physicalVelocityWorld: releasePhysicalVelocity.toArray(),
 		})
 
-		// Limpiar el agarre antes de iniciar la nueva geodésica.
-		xrGrabbedHandRef.current = null
-		xrHasPreviousPositionRef.current = false
-		xrPreviousRelativePositionRef.current.set(0, 0, 0)
-		// Conservar el promedio físico que se acaba de enviar para compararlo en el HUD.
-		xrLivePhysicalVelocityRef.current.copy(averageVelocity).multiplyScalar(0.2)
-		const sentAverageSpeedSquared = xrLivePhysicalVelocityRef.current.lengthSq()
-		if (sentAverageSpeedSquared > 0.99 * 0.99) {
-			xrLivePhysicalVelocityRef.current.multiplyScalar(0.99 / Math.sqrt(sentAverageSpeedSquared))
-		}
-		xrSentSampleCountRef.current = sampleCount
-		xrSentSampleIndexRef.current = xrVelocitySampleIndexRef.current
-		xrVelocitySampleCountRef.current = 0
-		xrVelocitySampleIndexRef.current = 0
-		releaseParticle(releasePosition, averageVelocity)
-		// Guardar la velocidad física exacta que releaseParticle registró para Rust.
+		releaseParticle(releasePosition, releaseVelocityWorld)
+		// Confirmar en el HUD el mismo valor físico que quedó registrado para Rust.
 		if (simulationDebugRef.current) {
 			xrSentPhysicalVelocityRef.current.fromArray(simulationDebugRef.current.physicalVelocity)
 		}
@@ -616,73 +672,69 @@ useEffect(() => {
 		const rightController = useXRInputSourceState('controller', 'right')
 		const currentParticlePositionRef = useRef(new Vector3())
 		const currentRelativePositionRef = useRef(new Vector3())
+		const instantaneousLocalVelocityRef = useRef(new Vector3())
+		const instantaneousWorldVelocityRef = useRef(new Vector3())
 
-		// selectend garantiza la suelta aunque el rayo ya no intersecte la esfera.
+		// Única señal de liberación: funciona aunque el rayo ya no toque la esfera.
 		useXRInputSourceEvent(leftController?.inputSource, 'selectend', () => finishXRThrow('left'), [leftController])
 		useXRInputSourceEvent(rightController?.inputSource, 'selectend', () => finishXRThrow('right'), [rightController])
 
-		useFrame((_, delta) => {
-			const grabbedHand = xrGrabbedHandRef.current
-			if (grabbedHand === null || !particleRef.current) return
+		useFrame(() => {
+			if (
+				xrThrowPhaseRef.current !== 'grabbed'
+				|| xrGrabbedHandRef.current === null
+				|| !particleRef.current
+				|| !xrOriginRef.current
+			) return
 
-			const controller = grabbedHand === 'left' ? leftController : rightController
+			const controller = xrGrabbedHandRef.current === 'left' ? leftController : rightController
 			if (!controller?.object) return
 
-			// Mantener el desplazamiento remoto inicial respecto a la pose del mando.
+			// La pelota conserva visualmente el offset remoto respecto al controlador.
 			controller.object.updateWorldMatrix(true, false)
-			const currentPosition = currentParticlePositionRef.current.copy(xrGrabOffsetRef.current)
-			controller.object.localToWorld(currentPosition)
-			particleRef.current.position.copy(currentPosition)
+			const currentPositionWorld = currentParticlePositionRef.current.copy(xrGrabOffsetRef.current)
+			controller.object.localToWorld(currentPositionWorld)
+			particleRef.current.position.copy(currentPositionWorld)
 
-			if (!xrHasPreviousPositionRef.current) {
-				xrPreviousParticlePositionRef.current.copy(currentPosition)
-				xrHasPreviousPositionRef.current = true
-				return
+			// Medir la trayectoria de la pelota en el espacio local del jugador elimina
+			// la traslación y rotación artificial introducidas por la locomoción.
+			xrOriginRef.current.updateWorldMatrix(true, false)
+			const currentPositionLocal = currentRelativePositionRef.current.copy(currentPositionWorld)
+			xrOriginRef.current.worldToLocal(currentPositionLocal)
+			const now = performance.now() / 1000
+
+			// LST conserva la muestra instantánea para diagnóstico, pero no se envía a Rust.
+			if (xrHasPreviousPositionRef.current) {
+				const deltaTime = now - xrPreviousSampleTimeRef.current
+				if (deltaTime > 1e-4) {
+					instantaneousLocalVelocityRef.current
+						.subVectors(currentPositionLocal, xrPreviousRelativePositionRef.current)
+						.multiplyScalar(1 / deltaTime)
+					xrOriginRef.current.getWorldQuaternion(xrOriginQuaternionRef.current)
+					instantaneousWorldVelocityRef.current
+						.copy(instantaneousLocalVelocityRef.current)
+						.applyQuaternion(xrOriginQuaternionRef.current)
+					copyPhysicalVelocity(instantaneousWorldVelocityRef.current, xrLastPhysicalVelocityRef.current)
+				}
 			}
 
-			if (delta <= 1e-4) return
+			xrPreviousParticlePositionRef.current.copy(currentPositionWorld)
+			xrPreviousRelativePositionRef.current.copy(currentPositionLocal)
+			xrPreviousSampleTimeRef.current = now
+			xrHasPreviousPositionRef.current = true
 
-			// Medir la velocidad relativa al jugador, no la del puntero ni la del mundo.
-			// Caminar o girar el XROrigin mueve la escena completa, pero no debe crear
-			// una velocidad inicial si la muñeca permanece quieta.
-			xrOriginRef.current?.updateWorldMatrix(true, false)
-			const currentRelativePosition = currentRelativePositionRef.current.copy(currentPosition)
-			if (xrOriginRef.current) xrOriginRef.current.worldToLocal(currentRelativePosition)
-
+			// Guardar posiciones con tiempo real; la regresión decidirá cuáles usar.
 			const sampleIndex = xrVelocitySampleIndexRef.current
-			xrVelocitySamplesRef.current[sampleIndex]
-				.subVectors(currentRelativePosition, xrPreviousRelativePositionRef.current)
-				.multiplyScalar(1 / delta)
-			xrPreviousParticlePositionRef.current.copy(currentPosition)
-			xrPreviousRelativePositionRef.current.copy(currentRelativePosition)
-
-			// Convertir la última muestra a la misma velocidad física que usa el HUD.
-			const lastPhysicalVelocity = xrLastPhysicalVelocityRef.current.copy(
-				xrVelocitySamplesRef.current[sampleIndex],
-			).multiplyScalar(0.2)
-			const lastSpeedSquared = lastPhysicalVelocity.lengthSq()
-			const maxPhysicalSpeed = 0.99
-			if (lastSpeedSquared > maxPhysicalSpeed * maxPhysicalSpeed) {
-				lastPhysicalVelocity.multiplyScalar(maxPhysicalSpeed / Math.sqrt(lastSpeedSquared))
-			}
-
-			// El HUD muestra la misma velocidad física que se usaría al soltar:
-			// primero se aplica la escala y después el límite relativista.
-			const liveVelocity = xrLivePhysicalVelocityRef.current.set(0, 0, 0)
-			const sampleCount = xrVelocitySampleCountRef.current
-			for (let index = 0; index < sampleCount; index += 1) {
-				liveVelocity.add(xrVelocitySamplesRef.current[index])
-			}
-			if (sampleCount > 0) liveVelocity.multiplyScalar(0.2 / sampleCount)
-			const liveSpeedSquared = liveVelocity.lengthSq()
-			if (liveSpeedSquared > maxPhysicalSpeed * maxPhysicalSpeed) {
-				liveVelocity.multiplyScalar(maxPhysicalSpeed / Math.sqrt(liveSpeedSquared))
-			}
-			xrVelocitySampleIndexRef.current = (sampleIndex + 1) % THROW_SAMPLE_COUNT
+			const sample = xrPositionSamplesRef.current[sampleIndex]
+			sample.time = now
+			sample.position.copy(currentPositionLocal)
+			xrVelocitySampleIndexRef.current = (sampleIndex + 1) % THROW_SAMPLE_CAPACITY
 			xrVelocitySampleCountRef.current = Math.min(
 				xrVelocitySampleCountRef.current + 1,
-				THROW_SAMPLE_COUNT,
+				THROW_SAMPLE_CAPACITY,
 			)
+
+			updateXRThrowEstimate(now)
 		})
 
 		return null
@@ -723,9 +775,9 @@ useEffect(() => {
 				.copy(cameraPositionRef.current)
 				.add(hudWorldOffsetRef.current.copy(hudOffsetRef.current).applyQuaternion(cameraQuaternionRef.current))
 
-			// Actualizar el texto a 8 Hz para evitar renders de React en cada frame.
+			// Actualizar a 20 Hz: suficiente para observar el candidato sin renderizar por frame.
 			updateAccumulatorRef.current += delta
-			if (updateAccumulatorRef.current < 0.125) return
+			if (updateAccumulatorRef.current < 0.05) return
 			updateAccumulatorRef.current = 0
 
 			const releasedVelocity = simulationDebugRef.current?.physicalVelocity ?? [0, 0, 0]
@@ -743,7 +795,7 @@ useEffect(() => {
 				average: xrLivePhysicalVelocityRef.current.toArray() as [number, number, number],
 				sent: xrSentPhysicalVelocityRef.current.toArray() as [number, number, number],
 				sampleCount: xrGrabbedHandRef.current
-					? xrVelocitySampleCountRef.current
+					? xrEstimateSampleCountRef.current
 					: xrSentSampleCountRef.current,
 				sampleIndex: xrGrabbedHandRef.current
 					? xrVelocitySampleIndexRef.current
@@ -771,7 +823,7 @@ useEffect(() => {
 						`LST ${snapshot.last.map(value => value.toFixed(3)).join(' ')}`,
 						`AVG ${snapshot.average.map(value => value.toFixed(3)).join(' ')}`,
 						`SND ${snapshot.sent.map(value => value.toFixed(3)).join(' ')}`,
-						`N ${snapshot.sampleCount}/4  IDX ${snapshot.sampleIndex}`,
+						`N ${snapshot.sampleCount}  IDX ${snapshot.sampleIndex}`,
 					].join('\n')}
 				</Text>
 			</group>
@@ -782,93 +834,55 @@ useEffect(() => {
 
 	const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
 		e.stopPropagation()
+		if (e.pointerType !== 'ray') return
 
-		if (e.pointerType === 'ray') {
-			const pointerState = (e as unknown as { pointerState?: XRRayPointerState }).pointerState
-			const handedness = pointerState?.inputSource?.handedness
-			const controllerObject = pointerState?.object
-
-			if ((handedness !== 'left' && handedness !== 'right') || !controllerObject || !particleRef.current || !xrOriginRef.current) {
-				console.warn('No se pudo iniciar el agarre XR', { handedness, controllerObject })
-				return
-			}
-
-			// El rayo selecciona desde lejos; se conserva la separación inicial al mando.
-			simRunningRef.current = false
-			draggingRef.current = false
-			xrGrabbedHandRef.current = handedness
-			controllerObject.updateWorldMatrix(true, false)
-			particleRef.current.getWorldPosition(xrPreviousParticlePositionRef.current)
-			// Inicializar la referencia en el espacio del jugador para ignorar
-			// cualquier desplazamiento acumulado al caminar hasta otra posición.
-			xrOriginRef.current.updateWorldMatrix(true, false)
-			xrPreviousRelativePositionRef.current.copy(xrPreviousParticlePositionRef.current)
-			xrOriginRef.current.worldToLocal(xrPreviousRelativePositionRef.current)
-			xrGrabOffsetRef.current.copy(xrPreviousParticlePositionRef.current)
-			controllerObject.worldToLocal(xrGrabOffsetRef.current)
-			xrHasPreviousPositionRef.current = true
-			xrVelocitySampleCountRef.current = 0
-			xrVelocitySampleIndexRef.current = 0
-			xrLivePhysicalVelocityRef.current.set(0, 0, 0)
-			xrLastPhysicalVelocityRef.current.set(0, 0, 0)
-
-			const xrPointerTarget = e.target as unknown as { setPointerCapture?: (pointerId: number) => void }
-			xrPointerTarget.setPointerCapture?.(e.pointerId)
-			console.log('XR grab ->', { hand: handedness, pointerType: e.pointerType })
+		const pointerState = (e as unknown as { pointerState?: XRRayPointerState }).pointerState
+		const handedness = pointerState?.inputSource?.handedness
+		const controllerObject = pointerState?.object
+		if (
+			(handedness !== 'left' && handedness !== 'right')
+			|| !controllerObject
+			|| !particleRef.current
+			|| !xrOriginRef.current
+		) {
+			console.warn('No se pudo iniciar el agarre XR', { handedness, controllerObject })
 			return
 		}
 
-		// El puntero grab corresponde al squeeze, reservado para controlar altura.
-		if (e.pointerType === 'grab') return
+		// Comenzar un ciclo XR nuevo y descartar por completo las muestras anteriores.
+		simRunningRef.current = false
+		clearXRThrowSamples()
+		xrThrowPhaseRef.current = 'grabbed'
+		xrGrabIdRef.current += 1
+		xrGrabbedHandRef.current = handedness
+		xrLiveInputVelocityWorldRef.current.set(0, 0, 0)
+		xrLivePhysicalVelocityRef.current.set(0, 0, 0)
+		xrLastPhysicalVelocityRef.current.set(0, 0, 0)
 
-		// Ruta desktop: conservar el comportamiento histórico del mouse.
-		draggingRef.current = true
-		const pointerTarget = e.target as EventTarget & { setPointerCapture?: (pointerId: number) => void }
-		pointerTarget.setPointerCapture?.(e.pointerId)
-		
-	// Reiniciar muestreo al comenzar arrastre
-	const position = particleRef.current?.getWorldPosition(new Vector3()) ?? new Vector3()
-	lastSampleRef.current = {
-		x: position.x,
-		y: position.y,
-		z: position.z,
-		t: performance.now(),
-	}
-	releaseVelocityRef.current = { vx: 0, vy: 0, vz: 0 }
-	}
+		// Conservar la posición visual exacta de la pelota al iniciar el agarre remoto.
+		controllerObject.updateWorldMatrix(true, false)
+		particleRef.current.getWorldPosition(xrPreviousParticlePositionRef.current)
+		xrGrabOffsetRef.current.copy(xrPreviousParticlePositionRef.current)
+		controllerObject.worldToLocal(xrGrabOffsetRef.current)
 
-	const handlePointerMove = (e: ThreeEvent<PointerEvent>) => {
-		if (e.pointerType === 'ray' || e.pointerType === 'grab') return
-		if (!draggingRef.current || !particleRef.current) return
-			particleRef.current.position.x = e.point.x
-			particleRef.current.position.z = e.point.z
-			particleRef.current.position.y = e.point.y 
-	}
+		// Sembrar el historial con la posición inicial relativa al jugador.
+		xrOriginRef.current.updateWorldMatrix(true, false)
+		xrPreviousRelativePositionRef.current.copy(xrPreviousParticlePositionRef.current)
+		xrOriginRef.current.worldToLocal(xrPreviousRelativePositionRef.current)
+		const now = performance.now() / 1000
+		xrPreviousSampleTimeRef.current = now
+		xrHasPreviousPositionRef.current = true
+		const initialSample = xrPositionSamplesRef.current[0]
+		initialSample.time = now
+		initialSample.position.copy(xrPreviousRelativePositionRef.current)
+		xrVelocitySampleCountRef.current = 1
+		xrVelocitySampleIndexRef.current = 1
 
-	const handlePointerUp = (e: ThreeEvent<PointerEvent>) => {
-		e.stopPropagation()
-
-		if (e.pointerType === 'ray') {
-			const pointerState = (e as unknown as { pointerState?: XRRayPointerState }).pointerState
-			const handedness = pointerState?.inputSource?.handedness
-			const xrPointerTarget = e.target as unknown as { releasePointerCapture?: (pointerId: number) => void }
-			xrPointerTarget.releasePointerCapture?.(e.pointerId)
-			if (handedness === 'left' || handedness === 'right') finishXRThrow(handedness)
-			return
-		}
-
-		if (e.pointerType === 'grab') return
-
-		// Ruta desktop: finalizar el lanzamiento medido con el mouse.
-		draggingRef.current = false
-		const pointerTarget = e.target as EventTarget & { releasePointerCapture?: (pointerId: number) => void }
-		pointerTarget.releasePointerCapture?.(e.pointerId)
-		handleParticleRelease()
-
-	//Mostrar velocidad de flick estimada al soltar
-	console.log('flick velocity 3D ->', releaseVelocityRef.current)
-	lastSampleRef.current = null
-
+		console.log('XR grab ->', {
+			grabId: xrGrabIdRef.current,
+			hand: handedness,
+			pointerType: e.pointerType,
+		})
 	}
 
 	const SimulationStepper = () => {
@@ -1015,11 +1029,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.23',
+			'version: 0.25',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.23`
-			: 'Sin condiciones iniciales\nversion: 0.23'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.25`
+			: 'Sin condiciones iniciales\nversion: 0.25'
 
 
 return (
@@ -1093,9 +1107,7 @@ return (
 <mesh
 	ref={particleRef}
 	position={[1.4, 1.4, -0.5]}
-	onPointerDown={handlePointerDown}
-	onPointerMove={handlePointerMove}
-	onPointerUp={handlePointerUp}>
+	onPointerDown={handlePointerDown}>
 
 	<sphereGeometry args={[0.1,16,16]} />
 	<meshStandardMaterial color="orange" />
