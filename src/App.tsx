@@ -85,6 +85,9 @@ const XRLocomotion = () => {
 	const forwardRef = useRef(new Vector3())
 	const rightRef = useRef(new Vector3())
 	const moveRef = useRef(new Vector3())
+	// Vectores reutilizados para girar alrededor de la cabeza, no del origen global.
+	const cameraPositionBeforeTurnRef = useRef(new Vector3())
+	const cameraPositionAfterTurnRef = useRef(new Vector3())
 
 	useFrame((_, delta) => {
 		if (!leftController || !xrOriginRef.current) return
@@ -127,7 +130,7 @@ const XRLocomotion = () => {
 		xrOriginRef.current.position.x += move.x
 		xrOriginRef.current.position.z += move.z
 	
-		// RS: rotacion izquierdaderecha
+		// RS: girar en el lugar alrededor de la posición horizontal actual de la cabeza.
 		const rightStick = 
 			rightController?.gamepad['xr-standard-thumbstick']
 
@@ -136,8 +139,22 @@ const XRLocomotion = () => {
 			const DEADZONE = 0.15
 			if (Math.abs(x) < DEADZONE) x = 0
 			const ROTATION_SPEED = 2.2
-		xrOriginRef.current.rotation.y -=
-			x * ROTATION_SPEED * delta
+			const turnAngle = -x * ROTATION_SPEED * delta
+
+			if (turnAngle !== 0) {
+				// En VR la cabeza tiene un offset físico respecto a XROrigin. Si solo se
+				// rota el grupo, ese offset describe un arco y parece que el jugador camina.
+				// Se conserva la posición mundial de la cámara para que el giro sea in situ.
+				camera.getWorldPosition(cameraPositionBeforeTurnRef.current)
+				xrOriginRef.current.rotation.y += turnAngle
+				xrOriginRef.current.updateWorldMatrix(true, true)
+				camera.getWorldPosition(cameraPositionAfterTurnRef.current)
+
+				xrOriginRef.current.position.x +=
+					cameraPositionBeforeTurnRef.current.x - cameraPositionAfterTurnRef.current.x
+				xrOriginRef.current.position.z +=
+					cameraPositionBeforeTurnRef.current.z - cameraPositionAfterTurnRef.current.z
+			}
 		}
 	
 	// L2/R2: bajar/subir altura
@@ -1029,11 +1046,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.25',
+			'version: 0.26',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.25`
-			: 'Sin condiciones iniciales\nversion: 0.25'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.26`
+			: 'Sin condiciones iniciales\nversion: 0.26'
 
 
 return (
