@@ -9,7 +9,11 @@ import initWasm, { get_radial_velocity, set_params, set_initial, set_initial_3d,
 const xrStore = createXRStore()
 
 const BLACK_HOLE_POSITION = { x: 0, y: 1.4, z: 0 }
-const TRAIL_MAX_POINTS = 10_000
+// Más puntos reducen los segmentos rectos visibles, especialmente cerca del horizonte.
+const TRAIL_MAX_POINTS = 50_000
+const PHYSICS_STEPS_PER_FRAME = 1_000
+const TRAIL_SEGMENTS_PER_FRAME = 5
+const PHYSICS_STEPS_PER_TRAIL_SEGMENT = PHYSICS_STEPS_PER_FRAME / TRAIL_SEGMENTS_PER_FRAME
 const THROW_SAMPLE_CAPACITY = 24
 const THROW_SAMPLE_WINDOW_SECONDS = 0.12
 const THROW_RELEASE_GUARD_SECONDS = 0.04
@@ -909,12 +913,34 @@ useEffect(() => {
 		//Avanzar solo si WASM esta listo y la simulacion esta activa
 		if (!wasmReady || !simRunningRef.current || !particleRef.current) return
 
-			const result = step(1000)
-			const nextX = result[0]
-			const nextY = result[1]
-			const nextZ = result[2]
-			const captured = result[3] === 1
-			const captureReason = result[4]
+			// Rust ya integra con pasos pequeños. Antes se dibujaba solamente el último
+			// resultado de 1000 pasos y la línea unía puntos demasiado alejados. Se divide
+			// el mismo avance físico total en cinco segmentos visibles, sin alterar dt.
+			let result = step(PHYSICS_STEPS_PER_TRAIL_SEGMENT)
+			let nextX = result[0]
+			let nextY = result[1]
+			let nextZ = result[2]
+			let captured = result[3] === 1
+			let captureReason = result[4]
+			appendTrailPoint(
+				BLACK_HOLE_POSITION.x + nextX,
+				BLACK_HOLE_POSITION.y + nextY,
+				BLACK_HOLE_POSITION.z + nextZ,
+			)
+
+			for (let segment = 1; segment < TRAIL_SEGMENTS_PER_FRAME && !captured; segment += 1) {
+				result = step(PHYSICS_STEPS_PER_TRAIL_SEGMENT)
+				nextX = result[0]
+				nextY = result[1]
+				nextZ = result[2]
+				captured = result[3] === 1
+				captureReason = result[4]
+				appendTrailPoint(
+					BLACK_HOLE_POSITION.x + nextX,
+					BLACK_HOLE_POSITION.y + nextY,
+					BLACK_HOLE_POSITION.z + nextZ,
+				)
+			}
 
 		// Rust devuelve posición relativa; Three.js usa posición absoluta de escena.
 		particleRef.current.position.set(
@@ -922,12 +948,6 @@ useEffect(() => {
 			BLACK_HOLE_POSITION.y + nextY,
 			BLACK_HOLE_POSITION.z + nextZ,
 		)
-		appendTrailPoint(
-			BLACK_HOLE_POSITION.x + nextX,
-			BLACK_HOLE_POSITION.y + nextY,
-			BLACK_HOLE_POSITION.z + nextZ,
-		)
-
 		// Actualizar el HUD a 8 Hz para evitar renderizar React en cada frame XR.
 		hudUpdateAccumulatorRef.current += delta
 		if (hudUpdateAccumulatorRef.current >= 0.125 || captured) {
@@ -1046,11 +1066,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.26',
+			'version: 0.27',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.26`
-			: 'Sin condiciones iniciales\nversion: 0.26'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.27`
+			: 'Sin condiciones iniciales\nversion: 0.27'
 
 
 return (
