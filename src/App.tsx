@@ -78,6 +78,70 @@ function XRResetButton({ onReset }: { onReset: () => void }) {
 	return null
 }
 
+function XRControllerLabel({ hand }: { hand: 'left' | 'right' }) {
+	const controller = useXRInputSourceState('controller', hand)
+	const { camera } = useThree()
+	const labelRef = useRef<Group>(null)
+	const controllerPositionRef = useRef(new Vector3())
+	const controllerQuaternionRef = useRef(new Quaternion())
+	const labelPositionRef = useRef(new Vector3())
+	const cameraQuaternionRef = useRef(new Quaternion())
+	const labelOffsetRef = useRef(
+		new Vector3(hand === 'left' ? -0.12 : 0.12, 0.09, -0.08),
+	)
+
+	const isLeft = hand === 'left'
+	const labelText = isLeft
+		? 'IZQUIERDO\nStick: mover\nGrip: bajar\nGatillo: agarrar / lanzar'
+		: 'DERECHO\nStick: girar\nGrip: subir\nA: reiniciar\nGatillo: agarrar / lanzar'
+	const labelHeight = isLeft ? 0.15 : 0.18
+
+	useFrame(() => {
+		const label = labelRef.current
+		const controllerObject = controller?.object
+		if (!label || !controllerObject) {
+			if (label) label.visible = false
+			return
+		}
+
+		// El offset se aplica en el espacio local del mando para acompañarlo al moverlo.
+		controllerObject.updateWorldMatrix(true, false)
+		controllerObject.getWorldPosition(controllerPositionRef.current)
+		controllerObject.getWorldQuaternion(controllerQuaternionRef.current)
+		labelPositionRef.current
+			.copy(labelOffsetRef.current)
+			.applyQuaternion(controllerQuaternionRef.current)
+			.add(controllerPositionRef.current)
+
+		label.visible = true
+		label.position.copy(labelPositionRef.current)
+		// El texto permanece orientado hacia los ojos, incluso si el mando apunta a otro lado.
+		camera.getWorldQuaternion(cameraQuaternionRef.current)
+		label.quaternion.copy(cameraQuaternionRef.current)
+	})
+
+	return (
+		<group ref={labelRef}>
+			<mesh position={[0, 0, -0.002]}>
+				<planeGeometry args={[0.38, labelHeight]} />
+				<meshBasicMaterial color="#05070d" transparent opacity={0.78} depthWrite={false} />
+			</mesh>
+			<Text
+				position={[0, 0, 0.002]}
+				color="#f8fafc"
+				fontSize={0.024}
+				lineHeight={1.15}
+				maxWidth={0.34}
+				textAlign="center"
+				anchorX="center"
+				anchorY="middle"
+			>
+				{labelText}
+			</Text>
+		</group>
+	)
+}
+
 function App() {
 
 
@@ -1066,11 +1130,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.27',
+			'version: 0.28',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.27`
-			: 'Sin condiciones iniciales\nversion: 0.27'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.28`
+			: 'Sin condiciones iniciales\nversion: 0.28'
 
 
 return (
@@ -1117,6 +1181,9 @@ return (
 	<XRLocomotion />
 	<XRThrowTracker />
 	<XRDiagnosticsHud />
+	{/* Etiquetas legibles que acompañan a los mandos XR. */}
+	<XRControllerLabel hand="left" />
+	<XRControllerLabel hand="right" />
 
 	{/* Para hacer reset con el boton a del metaquest */}
 
