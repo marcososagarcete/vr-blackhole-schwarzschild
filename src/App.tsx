@@ -20,6 +20,25 @@ const THROW_RELEASE_GUARD_SECONDS = 0.04
 const THROW_MIN_SAMPLE_SPAN_SECONDS = 0.025
 const INPUT_TO_PHYSICAL_SCALE = 0.2
 const MAX_PHYSICAL_SPEED = 0.99
+const CONTROL_DIAGRAM_COLOR = '#22d3ee'
+
+// Geometrías estáticas compartidas por los dos diagramas de mandos.
+const CONTROLLER_OUTLINE_POINTS = new Float32Array([
+	-0.055, 0.060, 0, 0.055, 0.060, 0, 0.075, 0.015, 0,
+	0.055, -0.065, 0, 0.000, -0.095, 0, -0.055, -0.065, 0,
+	-0.075, 0.015, 0,
+])
+const LEFT_CONTROLLER_CALLOUT_LINES = new Float32Array([
+	-0.024, 0.025, 0, 0.105, 0.055, 0, 0.105, 0.055, 0, 0.180, 0.055, 0,
+	-0.060, -0.025, 0, -0.125, -0.055, 0, -0.125, -0.055, 0, -0.180, -0.055, 0,
+	0.000, 0.070, 0, 0.035, 0.120, 0, 0.035, 0.120, 0, 0.180, 0.120, 0,
+])
+const RIGHT_CONTROLLER_CALLOUT_LINES = new Float32Array([
+	-0.024, 0.025, 0, -0.105, 0.055, 0, -0.105, 0.055, 0, -0.180, 0.055, 0,
+	-0.060, -0.025, 0, -0.125, -0.055, 0, -0.125, -0.055, 0, -0.180, -0.055, 0,
+	0.030, 0.028, 0, 0.110, 0.005, 0, 0.110, 0.005, 0, 0.180, 0.005, 0,
+	0.000, 0.070, 0, 0.035, 0.120, 0, 0.035, 0.120, 0, 0.180, 0.120, 0,
+])
 
 type InitialConditions = {
 	r0: number
@@ -87,14 +106,11 @@ function XRControllerLabel({ hand }: { hand: 'left' | 'right' }) {
 	const labelPositionRef = useRef(new Vector3())
 	const cameraQuaternionRef = useRef(new Quaternion())
 	const labelOffsetRef = useRef(
-		new Vector3(hand === 'left' ? -0.12 : 0.12, 0.09, -0.08),
+		new Vector3(hand === 'left' ? -0.20 : 0.20, 0.15, -0.10),
 	)
 
 	const isLeft = hand === 'left'
-	const labelText = isLeft
-		? 'IZQUIERDO\nStick: mover\nGrip: bajar\nGatillo: agarrar / lanzar'
-		: 'DERECHO\nStick: girar\nGrip: subir\nA: reiniciar\nGatillo: agarrar / lanzar'
-	const labelHeight = isLeft ? 0.15 : 0.18
+	const calloutLines = isLeft ? LEFT_CONTROLLER_CALLOUT_LINES : RIGHT_CONTROLLER_CALLOUT_LINES
 
 	useFrame(() => {
 		const label = labelRef.current
@@ -122,22 +138,56 @@ function XRControllerLabel({ hand }: { hand: 'left' | 'right' }) {
 
 	return (
 		<group ref={labelRef}>
-			<mesh position={[0, 0, -0.002]}>
-				<planeGeometry args={[0.38, labelHeight]} />
-				<meshBasicMaterial color="#05070d" transparent opacity={0.78} depthWrite={false} />
+			{/* Contorno minimalista: solo guía visual, no representa el modelo real exacto. */}
+			<lineLoop>
+				<bufferGeometry>
+					<bufferAttribute attach="attributes-position" args={[CONTROLLER_OUTLINE_POINTS, 3]} />
+				</bufferGeometry>
+				<lineBasicMaterial color={CONTROL_DIAGRAM_COLOR} depthTest={false} />
+			</lineLoop>
+			{/* Líneas que unen cada control del esquema con su función. */}
+			<lineSegments>
+				<bufferGeometry>
+					<bufferAttribute attach="attributes-position" args={[calloutLines, 3]} />
+				</bufferGeometry>
+				<lineBasicMaterial color={CONTROL_DIAGRAM_COLOR} depthTest={false} />
+			</lineSegments>
+			{/* Indicadores del joystick, grip, gatillo y, solo a la derecha, botón A. */}
+			<mesh position={[-0.024, 0.025, 0.001]}>
+				<ringGeometry args={[0.011, 0.017, 16]} />
+				<meshBasicMaterial color={CONTROL_DIAGRAM_COLOR} depthTest={false} />
 			</mesh>
-			<Text
-				position={[0, 0, 0.002]}
-				color="#f8fafc"
-				fontSize={0.024}
-				lineHeight={1.15}
-				maxWidth={0.34}
-				textAlign="center"
-				anchorX="center"
-				anchorY="middle"
-			>
-				{labelText}
+			<mesh position={[-0.060, -0.025, 0.001]}>
+				<ringGeometry args={[0.008, 0.013, 16]} />
+				<meshBasicMaterial color={CONTROL_DIAGRAM_COLOR} depthTest={false} />
+			</mesh>
+			<mesh position={[0, 0.070, 0.001]}>
+				<ringGeometry args={[0.008, 0.013, 16]} />
+				<meshBasicMaterial color={CONTROL_DIAGRAM_COLOR} depthTest={false} />
+			</mesh>
+			{!isLeft && (
+				<mesh position={[0.030, 0.028, 0.001]}>
+					<ringGeometry args={[0.008, 0.013, 16]} />
+					<meshBasicMaterial color={CONTROL_DIAGRAM_COLOR} depthTest={false} />
+				</mesh>
+			)}
+			<Text position={[0, 0.160, 0.002]} color={CONTROL_DIAGRAM_COLOR} fontSize={0.020} anchorX="center" anchorY="middle">
+				{isLeft ? 'MANDO IZQUIERDO' : 'MANDO DERECHO'}
 			</Text>
+			{isLeft ? (
+				<>
+					<Text position={[0.190, 0.055, 0.002]} color="white" fontSize={0.019} anchorX="left" anchorY="middle">{'JOYSTICK\nMOVERSE'}</Text>
+					<Text position={[-0.190, -0.055, 0.002]} color="white" fontSize={0.019} anchorX="right" anchorY="middle">{'GRIP\nBAJAR'}</Text>
+					<Text position={[0.190, 0.120, 0.002]} color="white" fontSize={0.019} anchorX="left" anchorY="middle">{'GATILLO\nAGARRAR / LANZAR'}</Text>
+				</>
+			) : (
+				<>
+					<Text position={[-0.190, 0.055, 0.002]} color="white" fontSize={0.019} anchorX="right" anchorY="middle">{'JOYSTICK\nGIRAR VISTA'}</Text>
+					<Text position={[-0.190, -0.055, 0.002]} color="white" fontSize={0.019} anchorX="right" anchorY="middle">{'GRIP\nSUBIR'}</Text>
+					<Text position={[0.190, 0.005, 0.002]} color="white" fontSize={0.019} anchorX="left" anchorY="middle">{'BOTÓN A\nREINICIAR'}</Text>
+					<Text position={[0.190, 0.120, 0.002]} color="white" fontSize={0.019} anchorX="left" anchorY="middle">{'GATILLO\nAGARRAR / LANZAR'}</Text>
+				</>
+			)}
 		</group>
 	)
 }
@@ -1130,11 +1180,11 @@ useEffect(() => {
 			`r: ${simulationDebug.currentR.toFixed(3)}`,
 			`rdot: ${simulationDebug.radialVelocity.toFixed(3)}`,
 			`status: ${simulationDebug.status}`,
-			'version: 0.28',
+			'version: 0.29',
 		].join('\n')
 		: initialConditions
-			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.28`
-			: 'Sin condiciones iniciales\nversion: 0.28'
+			? `IC\nr0: ${initialConditions.r0.toFixed(3)}\n|vhat|: ${(vhatMag ?? 0).toFixed(3)}\nversion: 0.29`
+			: 'Sin condiciones iniciales\nversion: 0.29'
 
 
 return (
